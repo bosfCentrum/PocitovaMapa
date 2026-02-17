@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: pocitova-mapa
+    runtime: python
+    plan: free
+    buildCommand: ""
+    startCommand: python server.py
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: DB_PATH
+        value: /var/data/pins.db
+    disk:
+      name: pocitova-mapa-data
+      mountPath: /var/data
+      sizeGB: 1

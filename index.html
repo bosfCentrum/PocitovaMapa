@@ -1,0 +1,48 @@
+﻿<!doctype html>
+<html lang="cs">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Pocitova mapa Hustopece</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="panel">
+        <h1>Pocitova mapa</h1>
+        <p class="city">Hustopece</p>
+        <p class="hint">Klikni do mapy, vyber jak se tam citis a pridej komentar k mistu.</p>
+        <section class="filters" aria-label="Filtry pinu">
+          <p class="filters-title">Zobrazit kategorie:</p>
+          <div id="filters-list" class="filters-list"></div>
+        </section>
+
+        <button id="clear-all" class="clear-btn" type="button">Smazat vsechny piny</button>
+      </aside>
+
+      <main class="map-wrap">
+        <div id="map" aria-label="Pocitova mapa Hustopece"></div>
+      </main>
+    </div>
+    <section id="pin-choice" class="pin-choice hidden" aria-live="polite">
+      <div class="pin-choice-card">
+        <p class="pin-choice-title">Jak se zde citis?</p>
+        <div id="pin-choice-options" class="pin-choice-options"></div>
+        <button id="choice-cancel" class="pin-choice-cancel" type="button">Zrusit</button>
+      </div>
+    </section>
+
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+    ></script>
+    <script src="app.js"></script>
+  </body>
+</html>
