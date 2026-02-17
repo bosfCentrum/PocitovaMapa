@@ -1,0 +1,44 @@
+{
+  "pins": [
+    {
+      "id": "seed-good-01",
+      "lat": 48.94095,
+      "lng": 16.738,
+      "type": "good",
+      "comment": "Prijemne misto na prochazku.",
+      "created_by_name": "Mestske testy"
+    },
+    {
+      "id": "seed-good-02",
+      "lat": 48.9442,
+      "lng": 16.7329,
+      "type": "good",
+      "comment": "Hezky vyhled a klid.",
+      "created_by_name": "Mestske testy"
+    },
+    {
+      "id": "seed-bad-01",
+      "lat": 48.93895,
+      "lng": 16.7348,
+      "type": "bad",
+      "comment": "Tady se vecer necitim bezpecne.",
+      "created_by_name": "Obcan A"
+    },
+    {
+      "id": "seed-change-01",
+      "lat": 48.9421,
+      "lng": 16.7411,
+      "type": "change",
+      "comment": "Tady to chce zmenu.",
+      "created_by_name": "Obcan B"
+    },
+    {
+      "id": "seed-change-02",
+      "lat": 48.9379,
+      "lng": 16.7392,
+      "type": "change",
+      "comment": "Chybi lepsi osvetleni.",
+      "created_by_name": "Obcan C"
+    }
+  ]
+}

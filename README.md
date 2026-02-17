@@ -1,92 +1,73 @@
 # Pocitova mapa Hustopece
 
-Jednoducha webova aplikace nad OpenStreetMap (Leaflet), kde muzes:
-- pridat pin podle toho, jak se na miste citis (`Dobre` / `Spatne`),
-- ulozit komentar ke kazdemu pinu,
-- sdilet data mezi zarizenimi pres backend.
+Webova aplikace nad OpenStreetMap (Leaflet) pro pridavani pinu s komentarem.
 
-Data se ukladaji do SQLite databaze `pins.db` na serveru.
+Typy pinu:
+- `Dobre` (zeleny)
+- `Spatne` (cerveny)
+- `Tady to chce zmenu` (zluty)
 
-## Spusteni
-1. Otevri terminal ve slozce projektu.
-2. Spust backend i web:
+## Co aplikace umi
+- prihlaseni bez hesla (`email + jmeno`)
+- role: `admin`, `moderator`, `user`
+- neprihlaseny uzivatel muze mapu jen prohlizet
+- prihlaseny uzivatel muze pridat pin
+- komentar lze upravit jen s opravnenim (autor pinu nebo admin)
+- smazani pinu: autor sveho pinu nebo admin (admin muze smazat libovolny pin)
+- filtrovat kategorie pres checkboxy
+- zobrazit pocty u kategorii
+- sdilet data mezi zarizenimi pres backend API
+
+## Lokalni spusteni
 
 ```powershell
 py server.py
 ```
 
-3. Otevri v prohlizeci:
-- na PC: `http://localhost:8080`
-- na telefonu ve stejne Wi-Fi: `http://<IP_PC>:8080`
+Aplikace pobezi na:
+- `http://localhost:8080`
+- v lokalni siti i na `http://<IP_PC>:8080`
 
-Priklad: `http://192.168.88.177:8080`
+## Deploy (Render)
 
-## Konfigurace (env)
+Repo je pripraveny pro Render pres `render.yaml`.
+
+`render.yaml` aktualne pocita s free planem:
+- bez persistentniho disku
+- bez `DB_PATH` override
+- start command: `python server.py`
+
+Dulezite:
+- na free planu je filesystem docasny
+- SQLite data se po restartu/redeployi mohou ztratit
+
+## Seed testovacich dat
+
+Soubor `seed.json` obsahuje testovaci piny.
+
+Pri startu serveru:
+- kdyz je DB prazdna a `SEED_IF_EMPTY=1` (default), seed se naimportuje
+- kdyz DB data obsahuje, seed se znovu nespousti
+
+To je vhodne pro testovani po deployi na Render free.
+
+## Konfigurace (ENV)
 - `HOST` (default `0.0.0.0`)
 - `PORT` (default `8080`)
 - `DB_PATH` (default `./pins.db`)
+- `SEED_IF_EMPTY` (default `1`)
+- `SEED_FILE` (default `seed.json`)
 
-Test healthcheck:
+Poznamka k rolim:
+- prvni uzivatel, ktery se kdy prihlasi do prazdne DB, dostane roli `admin`
 
-```text
-GET /healthz
-```
-
-## Deploy se SQLite (1 instance)
-Pro online provoz se SQLite je dulezite mit persistentni disk/volume.
-
-### Varianta A: Docker
-Build image:
-
-```bash
-docker build -t pocitova-mapa .
-```
-
-Run s persistentnim volume:
-
-```bash
-docker run -p 8080:8080 -e PORT=8080 -e DB_PATH=/data/pins.db -v pocitova_data:/data pocitova-mapa
-```
-
-### Varianta B: Render / Railway / Fly
-1. Nasad kod z repozitare.
-2. Spusteci prikaz: `python server.py`.
-3. Nastav env:
-   - `PORT` podle platformy (nektere ji nastavi samy),
-   - `DB_PATH` na cestu v persistentnim disku (napr. `/data/pins.db`).
-4. Pripoj persistentni disk/volume.
-5. Healthcheck endpoint: `/healthz`.
-
-Bez persistentniho disku by se data po redeployi nebo restartu ztratila.
-
-### Render (doporuceny postup)
-Projekt obsahuje `render.yaml`, ktery vytvori:
-- Web Service (`python server.py`)
-- Persistent Disk (`/var/data`)
-- `DB_PATH=/var/data/pins.db`
-
-Postup:
-1. Nahraj projekt na GitHub.
-2. V Renderu zvol `New` -> `Blueprint` a pripoj repozitar.
-3. Render nacte `render.yaml` a vytvori sluzbu i disk.
-4. Po deployi over:
-   - `https://<tvoje-sluzba>.onrender.com/healthz`
-   - `https://<tvoje-sluzba>.onrender.com`
-
-Poznamka:
-- Na `free` planu muze sluzba usinat pri neaktivite.
-- SQLite je zde vhodna pro 1 instanci; horizontalni scaling by chtel Postgres.
-
-## Pozdejsi migrace na Postgres
-Aktualni API vrstva uz oddeluje frontend od uloziste, takze migrace je realisticka i pozdeji:
-1. pridat datovou vrstvu (repository) do `server.py`,
-2. implementovat SQLite + Postgres variantu stejneho rozhrani,
-3. zvolit backend podle env prepinace.
-
-Frontend (`app.js`) se pri teto migraci menit nemusi.
-
-## API endpointy
-- `GET /api/pins` - seznam pinu
-- `POST /api/pins` - vytvoreni pinu
-- `PUT /api/pins/{id}` - uprava komentare
-- `DELETE /api/pins` - smazani vsech pinu
+## API
+- `GET /healthz`
+- `GET /api/auth/me`
+- `POST /api/auth/login`
+- `POST /api/auth/logout`
+- `GET /api/pins`
+- `POST /api/pins`
+- `PUT /api/pins/{id}`
+- `DELETE /api/pins/{id}` (admin)
+- `DELETE /api/pins`

@@ -1,4 +1,5 @@
-const API_BASE = "/api/pins";
+const API_BASE = "/api";
+const AUTH_STORAGE_KEY = "pocitovaMapaAuthToken";
 
 const DEFAULT_CATEGORIES = [
   { type: "good", label: "Dobre", tone: "good" },
@@ -16,6 +17,8 @@ const state = {
   commentSaveTimers: new Map(),
   categories: new Map(),
   selectedFilters: new Set(),
+  authToken: null,
+  authUser: null,
 };
 
 const map = L.map("map").setView(initialCenter, 15);
@@ -66,8 +69,20 @@ const pinChoice = document.getElementById("pin-choice");
 const pinChoiceOptions = document.getElementById("pin-choice-options");
 const choiceCancel = document.getElementById("choice-cancel");
 const filtersList = document.getElementById("filters-list");
+const authForm = document.getElementById("auth-form");
+const authEmailInput = document.getElementById("auth-email");
+const authNameInput = document.getElementById("auth-name");
+const authCurrent = document.getElementById("auth-current");
+const authCurrentText = document.getElementById("auth-current-text");
+const authLogoutButton = document.getElementById("auth-logout");
+const authNote = document.getElementById("auth-note");
 
 clearAllButton.addEventListener("click", async () => {
+  if (!state.authUser || state.authUser.role !== "admin") {
+    window.alert("Mazani vsech pinu je jen pro admina.");
+    return;
+  }
+
   if (!window.confirm("Opravdu smazat vsechny piny?")) {
     return;
   }
@@ -85,8 +100,40 @@ map.on("click", (event) => {
   if (Date.now() < state.ignoreMapClicksUntil) {
     return;
   }
+  if (!state.authUser) {
+    window.alert("Pro pridani pinu se prihlas (email + jmeno).");
+    return;
+  }
   state.pendingLatLng = event.latlng;
   showPinChoice();
+});
+
+authForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const email = authEmailInput.value.trim();
+  const name = authNameInput.value.trim();
+  if (!email || !name) return;
+
+  try {
+    const payload = await apiLogin(email, name);
+    setAuth(payload.token, payload.user);
+    refreshAuthUi();
+    await loadPinsFromServer();
+  } catch (error) {
+    showError(error);
+  }
+});
+
+authLogoutButton.addEventListener("click", async () => {
+  try {
+    await apiLogout();
+  } catch {
+    // Ignore logout request errors and clear local state anyway.
+  } finally {
+    setAuth(null, null);
+    refreshAuthUi();
+    loadPinsFromServer();
+  }
 });
 
 bindChoicePress(choiceCancel, hidePinChoice);
@@ -94,6 +141,58 @@ bindChoiceOptionPress();
 registerDefaultCategories();
 renderFilters();
 renderPinChoiceOptions();
+loadSession();
+refreshAuthUi();
+initialize();
+
+async function initialize() {
+  if (state.authToken) {
+    try {
+      const mePayload = await apiMe();
+      setAuth(state.authToken, mePayload.user || null);
+    } catch {
+      setAuth(null, null);
+    }
+    refreshAuthUi();
+  }
+
+  await loadPinsFromServer();
+}
+
+function loadSession() {
+  const token = localStorage.getItem(AUTH_STORAGE_KEY);
+  if (token) {
+    state.authToken = token;
+  }
+}
+
+function setAuth(token, user) {
+  state.authToken = token || null;
+  state.authUser = user || null;
+
+  if (state.authToken) {
+    localStorage.setItem(AUTH_STORAGE_KEY, state.authToken);
+  } else {
+    localStorage.removeItem(AUTH_STORAGE_KEY);
+  }
+}
+
+function refreshAuthUi() {
+  const isLoggedIn = Boolean(state.authUser);
+  authForm.classList.toggle("hidden", isLoggedIn);
+  authCurrent.classList.toggle("hidden", !isLoggedIn);
+
+  if (!isLoggedIn) {
+    authCurrentText.textContent = "";
+    authNote.textContent = "Neprihlaseny uzivatel muze mapu jen prohlizet.";
+    clearAllButton.disabled = true;
+    return;
+  }
+
+  authCurrentText.textContent = `${state.authUser.name} (${state.authUser.email}) - role: ${state.authUser.role}`;
+  authNote.textContent = "Prihlaseny uzivatel muze pridavat piny. Editace je dle opravneni.";
+  clearAllButton.disabled = state.authUser.role !== "admin";
+}
 
 function bindChoiceOptionPress() {
   const handler = (event) => {
@@ -157,7 +256,7 @@ function hidePinChoice() {
 }
 
 async function createPendingPin(type) {
-  if (!state.pendingLatLng || !type) return;
+  if (!state.pendingLatLng || !type || !state.authUser) return;
   const category = ensureCategory(type);
   if (!category) return;
 
@@ -266,6 +365,22 @@ function markerIconForType(type) {
   return neutralIcon;
 }
 
+function markerIconForPin(pin) {
+  if (!pin.is_owner) {
+    return markerIconForType(pin.type);
+  }
+
+  const baseIcon = markerIconForType(pin.type);
+  const iconUrl = baseIcon.options.iconUrl;
+  return L.divIcon({
+    className: "own-pin-wrap",
+    html: `<img class="own-pin-img" src="${iconUrl}" alt="" /><span class="own-pin-dot" aria-hidden="true"></span>`,
+    iconSize: [25, 41],
+    iconAnchor: [12, 41],
+    popupAnchor: [1, -34],
+  });
+}
+
 function addPinToMap(pin, openPopup = false) {
   if (!isValidPin(pin)) {
     return;
@@ -278,7 +393,7 @@ function addPinToMap(pin, openPopup = false) {
   ensureCategory(pin.type);
 
   const marker = L.marker([pin.lat, pin.lng], {
-    icon: markerIconForType(pin.type),
+    icon: markerIconForPin(pin),
   });
 
   const shouldBeVisible = matchesFilter(pin.type);
@@ -317,6 +432,16 @@ function buildPopupContent(pinId) {
   }
   container.appendChild(label);
 
+  const author = document.createElement("div");
+  author.className = "pin-author";
+  author.textContent = `Autor: ${pin.created_by_name || "Neznamy"}`;
+  container.appendChild(author);
+
+  const createdAt = document.createElement("div");
+  createdAt.className = "pin-author";
+  createdAt.textContent = `Vytvoreno: ${formatDateTime(pin.created_at)}`;
+  container.appendChild(createdAt);
+
   const form = document.createElement("form");
   form.className = "comment-form";
 
@@ -330,10 +455,16 @@ function buildPopupContent(pinId) {
   textarea.placeholder = "Proc se tady citis takto?";
   textarea.value = pin.comment || "";
 
+  if (!pin.can_edit) {
+    textarea.readOnly = true;
+    textarea.classList.add("readonly");
+  }
+
   labelEl.appendChild(textarea);
   form.appendChild(labelEl);
 
   const syncComment = () => {
+    if (!pin.can_edit) return;
     const next = state.markers.get(pinId);
     if (!next) return;
 
@@ -346,6 +477,25 @@ function buildPopupContent(pinId) {
   textarea.addEventListener("blur", syncComment);
 
   container.appendChild(form);
+
+  if (pin.can_delete) {
+    const deleteBtn = document.createElement("button");
+    deleteBtn.type = "button";
+    deleteBtn.className = "danger-btn";
+    deleteBtn.textContent = "Smazat pin";
+    deleteBtn.addEventListener("click", async () => {
+      if (!window.confirm("Opravdu smazat tento pin?")) return;
+      try {
+        await apiDeletePin(pin.id);
+        removePinFromMap(pin.id);
+        updateFilterCounts();
+      } catch (error) {
+        showError(error);
+      }
+    });
+    container.appendChild(deleteBtn);
+  }
+
   return container;
 }
 
@@ -358,9 +508,15 @@ function scheduleCommentSave(pinId, comment) {
   const timer = setTimeout(async () => {
     state.commentSaveTimers.delete(pinId);
     try {
-      await apiUpdatePinComment(pinId, comment);
+      const updated = await apiUpdatePinComment(pinId, comment);
+      const target = state.markers.get(pinId);
+      if (target) {
+        target.pin.comment = updated.comment;
+        target.pin.can_edit = updated.can_edit;
+      }
     } catch (error) {
       showError(error);
+      await loadPinsFromServer();
     }
   }, 350);
 
@@ -372,6 +528,18 @@ function clearAllMarkers() {
   state.markers.clear();
   state.commentSaveTimers.forEach((timerId) => clearTimeout(timerId));
   state.commentSaveTimers.clear();
+}
+
+function removePinFromMap(pinId) {
+  const target = state.markers.get(pinId);
+  if (!target) return;
+  map.removeLayer(target.marker);
+  state.markers.delete(pinId);
+  const timer = state.commentSaveTimers.get(pinId);
+  if (timer) {
+    clearTimeout(timer);
+    state.commentSaveTimers.delete(pinId);
+  }
 }
 
 function matchesFilter(pinType) {
@@ -427,56 +595,95 @@ function isValidPin(pin) {
     typeof pin?.lng === "number" &&
     typeof pin?.type === "string" &&
     pin.type.length > 0 &&
-    typeof pin?.comment === "string"
+    typeof pin?.comment === "string" &&
+    typeof pin?.created_at === "string"
   );
 }
 
-async function apiListPins() {
-  const response = await fetch(API_BASE);
-  if (!response.ok) {
-    throw new Error("Nepodarilo se nacist piny ze serveru.");
+function formatDateTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value || "-";
   }
-  const payload = await response.json();
+  return date.toLocaleString("cs-CZ");
+}
+
+async function apiRequest(path, options = {}) {
+  const headers = {
+    ...(options.headers || {}),
+  };
+  if (state.authToken) {
+    headers["X-Auth-Token"] = state.authToken;
+  }
+
+  const response = await fetch(path, {
+    ...options,
+    headers,
+  });
+
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = null;
+  }
+
+  if (!response.ok) {
+    const message = payload?.error || "Server error";
+    throw new Error(message);
+  }
+
+  return payload;
+}
+
+async function apiListPins() {
+  const payload = await apiRequest(`${API_BASE}/pins`);
   return Array.isArray(payload.pins) ? payload.pins : [];
 }
 
 async function apiCreatePin(pin) {
-  const response = await fetch(API_BASE, {
+  return apiRequest(`${API_BASE}/pins`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(pin),
   });
-
-  if (!response.ok) {
-    throw new Error("Nepodarilo se ulozit novy pin.");
-  }
-  return response.json();
 }
 
 async function apiUpdatePinComment(pinId, comment) {
-  const response = await fetch(`${API_BASE}/${encodeURIComponent(pinId)}`, {
+  return apiRequest(`${API_BASE}/pins/${encodeURIComponent(pinId)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ comment }),
   });
-
-  if (!response.ok) {
-    throw new Error("Nepodarilo se ulozit komentar.");
-  }
-  return response.json();
 }
 
 async function apiDeleteAllPins() {
-  const response = await fetch(API_BASE, { method: "DELETE" });
-  if (!response.ok) {
-    throw new Error("Nepodarilo se smazat piny.");
-  }
-  return response.json();
+  return apiRequest(`${API_BASE}/pins`, { method: "DELETE" });
+}
+
+async function apiDeletePin(pinId) {
+  return apiRequest(`${API_BASE}/pins/${encodeURIComponent(pinId)}`, {
+    method: "DELETE",
+  });
+}
+
+async function apiLogin(email, name) {
+  return apiRequest(`${API_BASE}/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, name }),
+  });
+}
+
+async function apiMe() {
+  return apiRequest(`${API_BASE}/auth/me`);
+}
+
+async function apiLogout() {
+  return apiRequest(`${API_BASE}/auth/logout`, { method: "POST" });
 }
 
 function showError(error) {
   console.error(error);
   window.alert(error?.message || "Doslo k chybe.");
 }
-
-loadPinsFromServer();

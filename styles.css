@@ -41,6 +41,50 @@ h1 {
   color: #5d5d5d;
 }
 
+.auth {
+  margin: 0.85rem 0 1rem;
+  padding: 0.65rem;
+  border: 1px solid #d8d4c8;
+  border-radius: 10px;
+  background: #fffef9;
+}
+
+.auth-form {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.auth-form input {
+  border: 1px solid #bcb9ae;
+  border-radius: 8px;
+  padding: 0.45rem 0.55rem;
+  font: inherit;
+}
+
+.auth-btn {
+  border: 1px solid #b9b7ac;
+  border-radius: 8px;
+  padding: 0.45rem 0.65rem;
+  background: #fff;
+  cursor: pointer;
+}
+
+.auth-current {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.auth-current-text {
+  font-size: 0.88rem;
+  color: #4f4f4f;
+}
+
+.auth-note {
+  margin: 0.55rem 0 0;
+  font-size: 0.82rem;
+  color: #616161;
+}
+
 .clear-btn {
   border: 1px solid #b9b7ac;
   border-radius: 10px;
@@ -224,6 +268,11 @@ h1 {
   font: inherit;
 }
 
+.comment-form textarea.readonly {
+  background: #f4f3ee;
+  color: #595959;
+}
+
 .pin-label {
   font-size: 0.85rem;
   font-weight: 700;
@@ -245,6 +294,12 @@ h1 {
 
 .pin-label.neutral {
   color: #24415d;
+}
+
+.pin-author {
+  margin-bottom: 0.45rem;
+  font-size: 0.8rem;
+  color: #595959;
 }
 
 .pin-choice {
@@ -316,6 +371,33 @@ h1 {
   margin-top: 0.5rem;
 }
 
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.own-pin-wrap {
+  position: relative;
+}
+
+.own-pin-wrap .own-pin-img {
+  width: 25px;
+  height: 41px;
+  display: block;
+}
+
+.own-pin-wrap .own-pin-dot {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 11px;
+  height: 11px;
+  border-radius: 999px;
+  background: #2e6fd8;
+  border: 2px solid #ffffff;
+  box-shadow: 0 0 0 1px rgba(36, 65, 93, 0.25);
+}
+
 @media (max-width: 860px) {
   .app-shell {
     grid-template-columns: 1fr;
@@ -330,4 +412,15 @@ h1 {
   #map {
     min-height: 65dvh;
   }
+}
+.danger-btn {
+  margin-top: 0.5rem;
+  width: 100%;
+  border: 1px solid #d88d87;
+  border-radius: 8px;
+  padding: 0.45rem 0.65rem;
+  background: #fff1ef;
+  color: #8a2118;
+  cursor: pointer;
+  font-weight: 600;
 }

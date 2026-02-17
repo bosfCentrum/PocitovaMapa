@@ -17,6 +17,19 @@
       <aside class="panel">
         <h1>Pocitova mapa</h1>
         <p class="city">Hustopece</p>
+        <section class="auth" aria-label="Prihlaseni">
+          <p class="filters-title">Uzivatel</p>
+          <form id="auth-form" class="auth-form">
+            <input id="auth-email" type="email" placeholder="Email" required />
+            <input id="auth-name" type="text" placeholder="Jmeno" required />
+            <button type="submit" class="auth-btn">Prihlasit</button>
+          </form>
+          <div id="auth-current" class="auth-current hidden">
+            <div id="auth-current-text" class="auth-current-text"></div>
+            <button id="auth-logout" class="auth-btn" type="button">Odhlasit</button>
+          </div>
+          <p id="auth-note" class="auth-note">Neprihlaseny uzivatel muze mapu jen prohlizet.</p>
+        </section>
         <p class="hint">Klikni do mapy, vyber jak se tam citis a pridej komentar k mistu.</p>
         <section class="filters" aria-label="Filtry pinu">
           <p class="filters-title">Zobrazit kategorie:</p>
