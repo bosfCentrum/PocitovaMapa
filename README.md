@@ -1,6 +1,6 @@
 # Pocitova mapa Hustopece
 
-Webova aplikace nad OpenStreetMap (Leaflet) pro pridavani pinu s komentarem.
+Webova aplikace nad OpenStreetMap (Leaflet) s podporou vice vrstev dat.
 
 Typy pinu:
 - `Dobre` (zeleny)
@@ -8,6 +8,9 @@ Typy pinu:
 - `Tady to chce zmenu` (zluty)
 
 ## Co aplikace umi
+- prepinat jednu nebo vice vrstev mapy najednou
+- vrstva `Pocitova mapa` (interaktivni piny uzivatelu)
+- vrstva `Mestske budovy` (staticka data majetku mesta)
 - prihlaseni bez hesla (`email + jmeno`)
 - role: `admin`, `moderator`, `user`
 - neprihlaseny uzivatel muze mapu jen prohlizet
@@ -41,9 +44,20 @@ Dulezite:
 - na free planu je filesystem docasny
 - SQLite data se po restartu/redeployi mohou ztratit
 
+## Datovy model
+
+Data jsou v SQLite rozdelena obecne:
+- `layers` (definice vrstev)
+- `layer_points` (body jednotlivych vrstev)
+
+API pro piny (`/api/pins`) zustava kvuli kompatibilite, ale uklada body do `layer_points` pod vrstvou `feelings`.
+
 ## Seed testovacich dat
 
-Soubor `seed.json` obsahuje testovaci piny.
+Soubor `seed.json` obsahuje:
+- definice vrstev (`layers`)
+- testovaci piny (`pins`, vrstva `feelings`)
+- vzorove body `city_buildings` (`points.city_buildings`)
 
 Pri startu serveru:
 - kdyz je DB prazdna a `SEED_IF_EMPTY=1` (default), seed se naimportuje
@@ -66,6 +80,9 @@ Poznamka k rolim:
 - `GET /api/auth/me`
 - `POST /api/auth/login`
 - `POST /api/auth/logout`
+- `GET /api/layers`
+- `GET /api/layers/{layerKey}/points`
+- `POST /api/layers/{layerKey}/points` (jen vrstvy s `allow_user_points=true`)
 - `GET /api/pins`
 - `POST /api/pins`
 - `PUT /api/pins/{id}`

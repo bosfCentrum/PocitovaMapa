@@ -40,7 +40,27 @@
       </aside>
 
       <main class="map-wrap">
+        <button id="mobile-panel-toggle" class="mobile-panel-toggle" type="button">
+          Menu
+        </button>
         <div id="map" aria-label="Pocitova mapa Hustopece"></div>
+        <div id="mobile-panel-backdrop" class="mobile-panel-backdrop" aria-hidden="true"></div>
+        <div class="map-layer-control">
+          <button
+            id="layer-toggle-btn"
+            class="layer-toggle-btn"
+            type="button"
+            aria-label="Zvolit vrstvu"
+            aria-expanded="false"
+            title="Zvolit vrstvu"
+          >
+            Zvolit vrstvu
+          </button>
+          <section id="layer-menu" class="layer-menu hidden" aria-label="Zobrazeni vrstev">
+            <p class="filters-title">Zobrazit vrstvy:</p>
+            <div id="layers-list" class="layers-list"></div>
+          </section>
+        </div>
       </main>
     </div>
     <section id="pin-choice" class="pin-choice hidden" aria-live="polite">

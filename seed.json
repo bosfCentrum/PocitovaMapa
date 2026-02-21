@@ -1,4 +1,22 @@
 {
+  "layers": [
+    {
+      "key": "feelings",
+      "name": "Pocitova mapa",
+      "kind": "interactive",
+      "allow_user_points": true,
+      "is_enabled": true,
+      "sort_order": 10
+    },
+    {
+      "key": "city_buildings",
+      "name": "Mestske budovy",
+      "kind": "static",
+      "allow_user_points": false,
+      "is_enabled": true,
+      "sort_order": 20
+    }
+  ],
   "pins": [
     {
       "id": "seed-good-01",
@@ -40,5 +58,45 @@
       "comment": "Chybi lepsi osvetleni.",
       "created_by_name": "Obcan C"
     }
-  ]
+  ],
+  "points": {
+    "city_buildings": [
+      {
+        "id": "building-001",
+        "lat": 48.94265,
+        "lng": 16.7357,
+        "title": "Mestsky urad",
+        "description": "Administrativni budova mesta.",
+        "data": {
+          "adresa": "Dukelske namesti 2",
+          "vyuziti": "Urad",
+          "spravce": "Mesto Hustopece"
+        }
+      },
+      {
+        "id": "building-002",
+        "lat": 48.94172,
+        "lng": 16.73924,
+        "title": "Kulturni dum",
+        "description": "Prostor pro kulturni akce.",
+        "data": {
+          "adresa": "Herbenova 5",
+          "vyuziti": "Kultura",
+          "spravce": "Mesto Hustopece"
+        }
+      },
+      {
+        "id": "building-003",
+        "lat": 48.93982,
+        "lng": 16.73376,
+        "title": "Sportovni hala",
+        "description": "Mestska sportovni hala.",
+        "data": {
+          "adresa": "Skolni 18",
+          "vyuziti": "Sport",
+          "spravce": "Mesto Hustopece"
+        }
+      }
+    ]
+  }
 }

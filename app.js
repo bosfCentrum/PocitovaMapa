@@ -1,5 +1,57 @@
+﻿
 const API_BASE = "/api";
 const AUTH_STORAGE_KEY = "pocitovaMapaAuthToken";
+const FEELINGS_LAYER_KEY = "feelings";
+const HEX_OVERLAY_LAYER_KEY = "north_hex_grid";
+const HUSTOPECE_OVERLAY_BOUNDS = {
+  south: 48.928,
+  north: 48.956,
+  west: 16.713,
+  east: 16.758,
+};
+
+const HEX_OVERLAY_STYLE = {
+  radiusMeters: 56,
+  color: "#7b7b7b",
+  fillColor: "#8a8a8a",
+  weight: 0.5,
+  opacity: 0.08,
+  fillOpacity: 0.12,
+};
+
+const HEX_NEUTRAL_STYLE = {
+  color: "#7b7b7b",
+  fillColor: "#8a8a8a",
+  opacity: 0.08,
+  fillOpacity: 0.12,
+};
+
+const DEFAULT_LAYERS = [
+  {
+    key: HEX_OVERLAY_LAYER_KEY,
+    name: "Hex overlay Hustopece",
+    kind: "overlay",
+    allow_user_points: false,
+    is_enabled: true,
+    sort_order: 5,
+  },
+  {
+    key: FEELINGS_LAYER_KEY,
+    name: "Pocitova mapa",
+    kind: "interactive",
+    allow_user_points: true,
+    is_enabled: true,
+    sort_order: 10,
+  },
+  {
+    key: "city_buildings",
+    name: "Mestske budovy",
+    kind: "static",
+    allow_user_points: false,
+    is_enabled: true,
+    sort_order: 20,
+  },
+];
 
 const DEFAULT_CATEGORIES = [
   { type: "good", label: "Dobre", tone: "good" },
@@ -11,12 +63,17 @@ const initialCenter = [48.9407, 16.7376];
 
 const state = {
   markers: new Map(),
+  staticLayerMarkers: new Map(),
+  layerGroups: new Map(),
+  availableLayers: new Map(),
+  selectedLayers: new Set(),
   pendingLatLng: null,
   ignoreMapClicksUntil: 0,
   ignoreChoicePressUntil: 0,
   commentSaveTimers: new Map(),
   categories: new Map(),
   selectedFilters: new Set(),
+  hexCellCount: 0,
   authToken: null,
   authUser: null,
 };
@@ -68,7 +125,13 @@ const clearAllButton = document.getElementById("clear-all");
 const pinChoice = document.getElementById("pin-choice");
 const pinChoiceOptions = document.getElementById("pin-choice-options");
 const choiceCancel = document.getElementById("choice-cancel");
+const layersList = document.getElementById("layers-list");
+const layerToggleButton = document.getElementById("layer-toggle-btn");
+const layerMenu = document.getElementById("layer-menu");
 const filtersList = document.getElementById("filters-list");
+const panel = document.querySelector(".panel");
+const mobilePanelToggle = document.getElementById("mobile-panel-toggle");
+const mobilePanelBackdrop = document.getElementById("mobile-panel-backdrop");
 const authForm = document.getElementById("auth-form");
 const authEmailInput = document.getElementById("auth-email");
 const authNameInput = document.getElementById("auth-name");
@@ -91,13 +154,21 @@ clearAllButton.addEventListener("click", async () => {
     await apiDeleteAllPins();
     clearAllMarkers();
     updateFilterCounts();
+    updateLayerCounts();
   } catch (error) {
     showError(error);
   }
 });
 
 map.on("click", (event) => {
+  if (closeMobilePanelIfOpen()) {
+    return;
+  }
   if (Date.now() < state.ignoreMapClicksUntil) {
+    return;
+  }
+  if (!isLayerVisible(FEELINGS_LAYER_KEY)) {
+    window.alert("Pro pridani pinu zapni vrstvu Pocitova mapa.");
     return;
   }
   if (!state.authUser) {
@@ -106,6 +177,10 @@ map.on("click", (event) => {
   }
   state.pendingLatLng = event.latlng;
   showPinChoice();
+});
+
+map.on("moveend", () => {
+  refreshHexOverlay();
 });
 
 authForm.addEventListener("submit", async (event) => {
@@ -118,7 +193,7 @@ authForm.addEventListener("submit", async (event) => {
     const payload = await apiLogin(email, name);
     setAuth(payload.token, payload.user);
     refreshAuthUi();
-    await loadPinsFromServer();
+    await loadDataForAllLayers();
   } catch (error) {
     showError(error);
   }
@@ -132,13 +207,16 @@ authLogoutButton.addEventListener("click", async () => {
   } finally {
     setAuth(null, null);
     refreshAuthUi();
-    loadPinsFromServer();
+    loadDataForAllLayers();
   }
 });
 
 bindChoicePress(choiceCancel, hidePinChoice);
 bindChoiceOptionPress();
+bindLayerMenu();
+bindMobilePanel();
 registerDefaultCategories();
+registerDefaultLayers();
 renderFilters();
 renderPinChoiceOptions();
 loadSession();
@@ -156,7 +234,9 @@ async function initialize() {
     refreshAuthUi();
   }
 
-  await loadPinsFromServer();
+  await loadLayersFromServer();
+  renderLayerFilters();
+  await loadDataForAllLayers();
 }
 
 function loadSession() {
@@ -192,6 +272,202 @@ function refreshAuthUi() {
   authCurrentText.textContent = `${state.authUser.name} (${state.authUser.email}) - role: ${state.authUser.role}`;
   authNote.textContent = "Prihlaseny uzivatel muze pridavat piny. Editace je dle opravneni.";
   clearAllButton.disabled = state.authUser.role !== "admin";
+}
+
+function registerDefaultLayers() {
+  state.selectedLayers.clear();
+  state.selectedLayers.add(FEELINGS_LAYER_KEY);
+
+  DEFAULT_LAYERS.forEach((layer) => {
+    registerOrUpdateLayer(layer);
+  });
+}
+
+function registerOrUpdateLayer(layer) {
+  if (!layer || typeof layer.key !== "string" || !layer.key.trim()) {
+    return;
+  }
+
+  const existing = state.availableLayers.get(layer.key) || {};
+  const next = {
+    ...existing,
+    key: layer.key,
+    name: typeof layer.name === "string" && layer.name.trim() ? layer.name : layer.key,
+    kind: typeof layer.kind === "string" && layer.kind.trim() ? layer.kind : "static",
+    allow_user_points: Boolean(layer.allow_user_points),
+    is_enabled: typeof layer.is_enabled === "boolean" ? layer.is_enabled : true,
+    sort_order: Number.isFinite(layer.sort_order) ? Number(layer.sort_order) : 100,
+  };
+  state.availableLayers.set(layer.key, next);
+  ensureLayerGroup(layer.key);
+
+}
+
+function bindLayerMenu() {
+  if (!layerToggleButton || !layerMenu) {
+    return;
+  }
+
+  layerToggleButton.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const shouldOpen = layerMenu.classList.contains("hidden");
+    layerMenu.classList.toggle("hidden", !shouldOpen);
+    layerToggleButton.setAttribute("aria-expanded", shouldOpen ? "true" : "false");
+  });
+
+  layerMenu.addEventListener("click", (event) => {
+    event.stopPropagation();
+  });
+
+  document.addEventListener("click", () => {
+    layerMenu.classList.add("hidden");
+    layerToggleButton.setAttribute("aria-expanded", "false");
+  });
+}
+
+function bindMobilePanel() {
+  if (!panel || !mobilePanelToggle || !mobilePanelBackdrop) {
+    return;
+  }
+
+  mobilePanelToggle.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const shouldOpen = !panel.classList.contains("mobile-open");
+    setMobilePanelOpen(shouldOpen);
+  });
+
+  mobilePanelBackdrop.addEventListener("click", () => {
+    setMobilePanelOpen(false);
+  });
+
+  window.addEventListener("resize", () => {
+    if (!isMobileViewport()) {
+      setMobilePanelOpen(false);
+    }
+  });
+}
+
+function isMobileViewport() {
+  return window.matchMedia("(max-width: 860px)").matches;
+}
+
+function setMobilePanelOpen(isOpen) {
+  if (!panel || !mobilePanelBackdrop || !mobilePanelToggle) {
+    return;
+  }
+  panel.classList.toggle("mobile-open", isOpen && isMobileViewport());
+  mobilePanelBackdrop.classList.toggle("active", isOpen && isMobileViewport());
+}
+
+function closeMobilePanelIfOpen() {
+  if (!panel || !isMobileViewport()) {
+    return false;
+  }
+  if (!panel.classList.contains("mobile-open")) {
+    return false;
+  }
+  setMobilePanelOpen(false);
+  return true;
+}
+
+function ensureLayerGroup(layerKey) {
+  if (!state.layerGroups.has(layerKey)) {
+    state.layerGroups.set(layerKey, L.layerGroup());
+  }
+  if (
+    layerKey !== FEELINGS_LAYER_KEY &&
+    layerKey !== HEX_OVERLAY_LAYER_KEY &&
+    !state.staticLayerMarkers.has(layerKey)
+  ) {
+    state.staticLayerMarkers.set(layerKey, new Map());
+  }
+  return state.layerGroups.get(layerKey);
+}
+
+function isLayerVisible(layerKey) {
+  return state.selectedLayers.has(layerKey);
+}
+
+function applyLayerVisibility() {
+  state.layerGroups.forEach((group, layerKey) => {
+    const shouldBeVisible = isLayerVisible(layerKey);
+    const isVisible = map.hasLayer(group);
+
+    if (shouldBeVisible && !isVisible) {
+      group.addTo(map);
+      return;
+    }
+
+    if (!shouldBeVisible && isVisible) {
+      map.removeLayer(group);
+    }
+  });
+
+  if (!isLayerVisible(FEELINGS_LAYER_KEY)) {
+    hidePinChoice();
+  }
+
+  refreshHexOverlay();
+}
+
+function renderLayerFilters() {
+  layersList.innerHTML = "";
+
+  const rows = Array.from(state.availableLayers.values())
+    .filter((layer) => layer.is_enabled)
+    .sort((a, b) => a.sort_order - b.sort_order || a.key.localeCompare(b.key));
+
+  rows.forEach((layer) => {
+    const row = document.createElement("label");
+    row.className = "layer-item";
+
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.className = "filter-checkbox";
+    checkbox.checked = state.selectedLayers.has(layer.key);
+
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) {
+        state.selectedLayers.add(layer.key);
+      } else {
+        state.selectedLayers.delete(layer.key);
+      }
+      applyLayerVisibility();
+    });
+
+    const text = document.createElement("span");
+    text.className = "layer-label";
+    text.textContent = layer.name;
+
+    const count = document.createElement("span");
+    count.className = "layer-count";
+    count.dataset.layerCountKey = layer.key;
+    count.textContent = "(0)";
+
+    row.appendChild(checkbox);
+    row.appendChild(text);
+    row.appendChild(count);
+    layersList.appendChild(row);
+  });
+
+  updateLayerCounts();
+}
+
+function updateLayerCounts() {
+  layersList.querySelectorAll("[data-layer-count-key]").forEach((countEl) => {
+    const key = countEl.dataset.layerCountKey;
+    let count = 0;
+    if (key === FEELINGS_LAYER_KEY) {
+      count = state.markers.size;
+    } else if (key === HEX_OVERLAY_LAYER_KEY) {
+      count = state.hexCellCount;
+    } else {
+      count = state.staticLayerMarkers.get(key)?.size || 0;
+    }
+    countEl.textContent = `(${count})`;
+  });
 }
 
 function bindChoiceOptionPress() {
@@ -274,6 +550,8 @@ async function createPendingPin(type) {
     const saved = await apiCreatePin(pin);
     addPinToMap(saved, true);
     updateFilterCounts();
+    updateLayerCounts();
+    refreshHexOverlay();
   } catch (error) {
     showError(error);
   }
@@ -391,6 +669,7 @@ function addPinToMap(pin, openPopup = false) {
   }
 
   ensureCategory(pin.type);
+  const feelingsGroup = ensureLayerGroup(FEELINGS_LAYER_KEY);
 
   const marker = L.marker([pin.lat, pin.lng], {
     icon: markerIconForPin(pin),
@@ -398,13 +677,13 @@ function addPinToMap(pin, openPopup = false) {
 
   const shouldBeVisible = matchesFilter(pin.type);
   if (shouldBeVisible) {
-    marker.addTo(map);
+    marker.addTo(feelingsGroup);
   }
 
   state.markers.set(pin.id, { marker, pin });
   marker.bindPopup(buildPopupContent(pin.id));
 
-  if (openPopup && shouldBeVisible) {
+  if (openPopup && shouldBeVisible && isLayerVisible(FEELINGS_LAYER_KEY)) {
     marker.openPopup();
   }
 }
@@ -441,6 +720,13 @@ function buildPopupContent(pinId) {
   createdAt.className = "pin-author";
   createdAt.textContent = `Vytvoreno: ${formatDateTime(pin.created_at)}`;
   container.appendChild(createdAt);
+
+  if (typeof pin.created_from_ip === "string" && pin.created_from_ip.trim()) {
+    const sourceIp = document.createElement("div");
+    sourceIp.className = "pin-author";
+    sourceIp.textContent = `Verejna IP: ${pin.created_from_ip}`;
+    container.appendChild(sourceIp);
+  }
 
   const form = document.createElement("form");
   form.className = "comment-form";
@@ -489,6 +775,7 @@ function buildPopupContent(pinId) {
         await apiDeletePin(pin.id);
         removePinFromMap(pin.id);
         updateFilterCounts();
+        updateLayerCounts();
       } catch (error) {
         showError(error);
       }
@@ -516,7 +803,7 @@ function scheduleCommentSave(pinId, comment) {
       }
     } catch (error) {
       showError(error);
-      await loadPinsFromServer();
+      await loadDataForAllLayers();
     }
   }, 350);
 
@@ -524,22 +811,26 @@ function scheduleCommentSave(pinId, comment) {
 }
 
 function clearAllMarkers() {
-  state.markers.forEach(({ marker }) => map.removeLayer(marker));
+  const feelingsGroup = ensureLayerGroup(FEELINGS_LAYER_KEY);
+  state.markers.forEach(({ marker }) => feelingsGroup.removeLayer(marker));
   state.markers.clear();
   state.commentSaveTimers.forEach((timerId) => clearTimeout(timerId));
   state.commentSaveTimers.clear();
+  refreshHexOverlay();
 }
 
 function removePinFromMap(pinId) {
   const target = state.markers.get(pinId);
   if (!target) return;
-  map.removeLayer(target.marker);
+  const feelingsGroup = ensureLayerGroup(FEELINGS_LAYER_KEY);
+  feelingsGroup.removeLayer(target.marker);
   state.markers.delete(pinId);
   const timer = state.commentSaveTimers.get(pinId);
   if (timer) {
     clearTimeout(timer);
     state.commentSaveTimers.delete(pinId);
   }
+  refreshHexOverlay();
 }
 
 function matchesFilter(pinType) {
@@ -547,17 +838,19 @@ function matchesFilter(pinType) {
 }
 
 function applyFilterToMarkers() {
+  const feelingsGroup = ensureLayerGroup(FEELINGS_LAYER_KEY);
+
   state.markers.forEach(({ marker, pin }) => {
     const shouldBeVisible = matchesFilter(pin.type);
-    const isVisible = map.hasLayer(marker);
+    const isVisible = feelingsGroup.hasLayer(marker);
 
     if (shouldBeVisible && !isVisible) {
-      marker.addTo(map);
+      marker.addTo(feelingsGroup);
       return;
     }
 
     if (!shouldBeVisible && isVisible) {
-      map.removeLayer(marker);
+      feelingsGroup.removeLayer(marker);
     }
   });
 }
@@ -574,15 +867,350 @@ function updateFilterCounts() {
   });
 }
 
-async function loadPinsFromServer() {
+function refreshHexOverlay() {
+  const hexGroup = ensureLayerGroup(HEX_OVERLAY_LAYER_KEY);
+  hexGroup.clearLayers();
+  state.hexCellCount = 0;
+
+  if (!isLayerVisible(HEX_OVERLAY_LAYER_KEY)) {
+    updateLayerCounts();
+    return;
+  }
+
+  const north = HUSTOPECE_OVERLAY_BOUNDS.north;
+  const south = HUSTOPECE_OVERLAY_BOUNDS.south;
+  const west = HUSTOPECE_OVERLAY_BOUNDS.west;
+  const east = HUSTOPECE_OVERLAY_BOUNDS.east;
+
+  if (south >= north) {
+    updateLayerCounts();
+    return;
+  }
+
+  const radius = HEX_OVERLAY_STYLE.radiusMeters;
+  const latStep = metersToLatDegrees(Math.sqrt(3) * radius);
+  const centerLat = (south + north) / 2;
+  const lngStep = metersToLngDegrees(1.5 * radius, centerLat);
+
+  if (!Number.isFinite(latStep) || !Number.isFinite(lngStep) || latStep <= 0 || lngStep <= 0) {
+    updateLayerCounts();
+    return;
+  }
+
+  const hexCells = [];
+  let col = 0;
+  for (let lng = west - lngStep; lng <= east + lngStep; lng += lngStep) {
+    const colLatOffset = col % 2 === 0 ? 0 : latStep / 2;
+    for (let lat = south - latStep; lat <= north + latStep; lat += latStep) {
+      const centerLat = lat + colLatOffset;
+      const vertices = buildHexagonLatLng(centerLat, lng, radius);
+      const polygon = L.polygon(vertices, {
+        color: HEX_NEUTRAL_STYLE.color,
+        fillColor: HEX_NEUTRAL_STYLE.fillColor,
+        weight: HEX_OVERLAY_STYLE.weight,
+        opacity: HEX_NEUTRAL_STYLE.opacity,
+        fillOpacity: HEX_NEUTRAL_STYLE.fillOpacity,
+        interactive: false,
+        bubblingMouseEvents: false,
+      });
+      polygon.addTo(hexGroup);
+      state.hexCellCount += 1;
+      hexCells.push({
+        polygon,
+        vertices,
+        score: 0,
+      });
+    }
+    col += 1;
+  }
+
+  applyFeelingIntensityToHexCells(hexCells);
+  updateLayerCounts();
+}
+
+function applyFeelingIntensityToHexCells(hexCells) {
+  if (!Array.isArray(hexCells) || hexCells.length === 0) {
+    return;
+  }
+
+  state.markers.forEach(({ pin }) => {
+    const type = pin.type;
+    const point = [pin.lat, pin.lng];
+    for (const cell of hexCells) {
+      if (pointInPolygon(point, cell.vertices)) {
+        if (type === "good") {
+          cell.goodCount = (cell.goodCount || 0) + 1;
+        } else if (type === "bad") {
+          cell.badCount = (cell.badCount || 0) + 1;
+        } else if (type === "change") {
+          cell.changeCount = (cell.changeCount || 0) + 1;
+        }
+        break;
+      }
+    }
+  });
+
+  let maxPositive = 0;
+  let maxNegative = 0;
+  let maxChange = 0;
+  hexCells.forEach((cell) => {
+    const goodCount = cell.goodCount || 0;
+    const badCount = cell.badCount || 0;
+    const changeCount = cell.changeCount || 0;
+    cell.positiveStrength = Math.max(goodCount - badCount, 0);
+    cell.negativeStrength = Math.max(badCount - goodCount, 0);
+    cell.changeStrength = changeCount;
+
+    maxPositive = Math.max(maxPositive, cell.positiveStrength);
+    maxNegative = Math.max(maxNegative, cell.negativeStrength);
+    maxChange = Math.max(maxChange, cell.changeStrength);
+  });
+
+  hexCells.forEach((cell) => {
+    const positiveStrength = cell.positiveStrength || 0;
+    const negativeStrength = cell.negativeStrength || 0;
+    const changeStrength = cell.changeStrength || 0;
+
+    if (positiveStrength >= negativeStrength && positiveStrength >= changeStrength && positiveStrength > 0 && maxPositive > 0) {
+      const t = positiveStrength / maxPositive;
+      const boosted = 0.35 + 0.65 * t;
+      cell.polygon.setStyle({
+        color: interpolateColor("#5f8f6a", "#2e9f50", boosted),
+        fillColor: interpolateColor("#bcd9c4", "#2e9f50", boosted),
+        opacity: 0.14 + 0.18 * boosted,
+        fillOpacity: 0.22 + 0.30 * boosted,
+      });
+      return;
+    }
+
+    if (negativeStrength >= positiveStrength && negativeStrength >= changeStrength && negativeStrength > 0 && maxNegative > 0) {
+      const t = negativeStrength / maxNegative;
+      cell.polygon.setStyle({
+        color: interpolateColor("#b79590", "#c0392b", t),
+        fillColor: interpolateColor("#f0d9d6", "#c0392b", t),
+        opacity: 0.08 + 0.16 * t,
+        fillOpacity: 0.12 + 0.34 * t,
+      });
+      return;
+    }
+
+    if (changeStrength > 0 && maxChange > 0) {
+      const t = changeStrength / maxChange;
+      cell.polygon.setStyle({
+        color: interpolateColor("#c6b576", "#b08b00", t),
+        fillColor: interpolateColor("#f6efd1", "#d8b21a", t),
+        opacity: 0.08 + 0.16 * t,
+        fillOpacity: 0.12 + 0.34 * t,
+      });
+      return;
+    }
+
+    cell.polygon.setStyle({
+      color: HEX_NEUTRAL_STYLE.color,
+      fillColor: HEX_NEUTRAL_STYLE.fillColor,
+      opacity: HEX_NEUTRAL_STYLE.opacity,
+      fillOpacity: HEX_NEUTRAL_STYLE.fillOpacity,
+    });
+  });
+}
+
+function pointInPolygon(point, vertices) {
+  const y = point[0];
+  const x = point[1];
+  let inside = false;
+
+  for (let i = 0, j = vertices.length - 1; i < vertices.length; j = i, i += 1) {
+    const yi = vertices[i][0];
+    const xi = vertices[i][1];
+    const yj = vertices[j][0];
+    const xj = vertices[j][1];
+
+    const intersects = yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi;
+    if (intersects) {
+      inside = !inside;
+    }
+  }
+
+  return inside;
+}
+
+function interpolateColor(startHex, endHex, t) {
+  const start = hexToRgb(startHex);
+  const end = hexToRgb(endHex);
+  const clamped = Math.max(0, Math.min(1, t));
+  const r = Math.round(start.r + (end.r - start.r) * clamped);
+  const g = Math.round(start.g + (end.g - start.g) * clamped);
+  const b = Math.round(start.b + (end.b - start.b) * clamped);
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
+function hexToRgb(hex) {
+  const clean = hex.replace("#", "");
+  return {
+    r: Number.parseInt(clean.slice(0, 2), 16),
+    g: Number.parseInt(clean.slice(2, 4), 16),
+    b: Number.parseInt(clean.slice(4, 6), 16),
+  };
+}
+
+function buildHexagonLatLng(centerLat, centerLng, radiusMeters) {
+  const points = [];
+  for (let i = 0; i < 6; i += 1) {
+    const angleRad = ((60 * i) * Math.PI) / 180;
+    const dx = radiusMeters * Math.cos(angleRad);
+    const dy = radiusMeters * Math.sin(angleRad);
+    points.push([
+      centerLat + metersToLatDegrees(dy),
+      centerLng + metersToLngDegrees(dx, centerLat),
+    ]);
+  }
+  return points;
+}
+
+function metersToLatDegrees(meters) {
+  return meters / 111320;
+}
+
+function metersToLngDegrees(meters, lat) {
+  const cosLat = Math.cos((lat * Math.PI) / 180);
+  if (Math.abs(cosLat) < 1e-6) {
+    return 0;
+  }
+  return meters / (111320 * cosLat);
+}
+
+function clearAllStaticLayerMarkers() {
+  state.staticLayerMarkers.forEach((layerMap, layerKey) => {
+    const group = ensureLayerGroup(layerKey);
+    layerMap.forEach(({ marker }) => group.removeLayer(marker));
+    layerMap.clear();
+  });
+}
+
+function addStaticPointToLayer(layerKey, point) {
+  if (!isValidStaticPoint(point)) {
+    return;
+  }
+
+  const group = ensureLayerGroup(layerKey);
+  const layerMap = state.staticLayerMarkers.get(layerKey);
+  if (!layerMap || layerMap.has(point.id)) {
+    return;
+  }
+
+  const marker = createStaticMarker(layerKey, point);
+  marker.addTo(group);
+  marker.bindPopup(buildStaticPopupContent(layerKey, point));
+
+  layerMap.set(point.id, { marker, point });
+}
+
+function createStaticMarker(layerKey, point) {
+  if (layerKey === "city_buildings") {
+    return L.circleMarker([point.lat, point.lng], {
+      radius: 7,
+      color: "#2f5678",
+      weight: 2,
+      fillColor: "#5f90bb",
+      fillOpacity: 0.82,
+    });
+  }
+
+  return L.circleMarker([point.lat, point.lng], {
+    radius: 6,
+    color: "#45545f",
+    weight: 2,
+    fillColor: "#7f95a7",
+    fillOpacity: 0.78,
+  });
+}
+
+function buildStaticPopupContent(layerKey, point) {
+  const layer = state.availableLayers.get(layerKey);
+  const container = document.createElement("div");
+
+  const title = document.createElement("div");
+  title.className = "pin-label neutral";
+  title.textContent = point.title || layer?.name || "Bod vrstvy";
+  container.appendChild(title);
+
+  if (point.description) {
+    const desc = document.createElement("div");
+    desc.className = "pin-author";
+    desc.textContent = point.description;
+    container.appendChild(desc);
+  }
+
+  if (point.data && typeof point.data === "object") {
+    Object.entries(point.data).forEach(([key, value]) => {
+      if (value == null || value === "") return;
+      const row = document.createElement("div");
+      row.className = "pin-author";
+      row.textContent = `${prettifyCategoryLabel(key)}: ${String(value)}`;
+      container.appendChild(row);
+    });
+  }
+
+  return container;
+}
+
+async function loadLayersFromServer() {
+  try {
+    const layers = await apiListLayers();
+    layers.forEach((layer) => registerOrUpdateLayer(layer));
+
+    const enabledKeys = new Set(
+      Array.from(state.availableLayers.values())
+        .filter((layer) => layer.is_enabled)
+        .map((layer) => layer.key)
+    );
+    state.selectedLayers.forEach((key) => {
+      if (!enabledKeys.has(key)) {
+        state.selectedLayers.delete(key);
+      }
+    });
+  } catch (error) {
+    showError(error);
+  }
+}
+
+async function loadDataForAllLayers() {
   try {
     const pins = await apiListPins();
     clearAllMarkers();
     pins.forEach((pin) => {
       addPinToMap(pin, false);
     });
+
+    clearAllStaticLayerMarkers();
+    const staticLayerKeys = Array.from(state.availableLayers.keys()).filter(
+      (key) => key !== FEELINGS_LAYER_KEY && key !== HEX_OVERLAY_LAYER_KEY
+    );
+
+    const staticResults = await Promise.all(
+      staticLayerKeys.map(async (layerKey) => {
+        try {
+          return {
+            layerKey,
+            points: await apiListLayerPoints(layerKey),
+          };
+        } catch {
+          return {
+            layerKey,
+            points: [],
+          };
+        }
+      })
+    );
+
+    staticResults.forEach(({ layerKey, points }) => {
+      points.forEach((point) => addStaticPointToLayer(layerKey, point));
+    });
+
     applyFilterToMarkers();
+    applyLayerVisibility();
     updateFilterCounts();
+    updateLayerCounts();
   } catch (error) {
     showError(error);
   }
@@ -597,6 +1225,14 @@ function isValidPin(pin) {
     pin.type.length > 0 &&
     typeof pin?.comment === "string" &&
     typeof pin?.created_at === "string"
+  );
+}
+
+function isValidStaticPoint(point) {
+  return (
+    typeof point?.id === "string" &&
+    typeof point?.lat === "number" &&
+    typeof point?.lng === "number"
   );
 }
 
@@ -639,6 +1275,16 @@ async function apiRequest(path, options = {}) {
 async function apiListPins() {
   const payload = await apiRequest(`${API_BASE}/pins`);
   return Array.isArray(payload.pins) ? payload.pins : [];
+}
+
+async function apiListLayers() {
+  const payload = await apiRequest(`${API_BASE}/layers`);
+  return Array.isArray(payload.layers) ? payload.layers : [];
+}
+
+async function apiListLayerPoints(layerKey) {
+  const payload = await apiRequest(`${API_BASE}/layers/${encodeURIComponent(layerKey)}/points`);
+  return Array.isArray(payload.points) ? payload.points : [];
 }
 
 async function apiCreatePin(pin) {
