@@ -135,6 +135,7 @@ const mobilePanelBackdrop = document.getElementById("mobile-panel-backdrop");
 const authForm = document.getElementById("auth-form");
 const authEmailInput = document.getElementById("auth-email");
 const authNameInput = document.getElementById("auth-name");
+const authRegisterButton = document.getElementById("auth-register");
 const authCurrent = document.getElementById("auth-current");
 const authCurrentText = document.getElementById("auth-current-text");
 const authLogoutButton = document.getElementById("auth-logout");
@@ -191,6 +192,21 @@ authForm.addEventListener("submit", async (event) => {
 
   try {
     const payload = await apiLogin(email, name);
+    setAuth(payload.token, payload.user);
+    refreshAuthUi();
+    await loadDataForAllLayers();
+  } catch (error) {
+    showError(error);
+  }
+});
+
+authRegisterButton.addEventListener("click", async () => {
+  const email = authEmailInput.value.trim();
+  const name = authNameInput.value.trim();
+  if (!email || !name) return;
+
+  try {
+    const payload = await apiRegister(email, name);
     setAuth(payload.token, payload.user);
     refreshAuthUi();
     await loadDataForAllLayers();
@@ -1315,6 +1331,14 @@ async function apiDeletePin(pinId) {
 
 async function apiLogin(email, name) {
   return apiRequest(`${API_BASE}/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, name }),
+  });
+}
+
+async function apiRegister(email, name) {
+  return apiRequest(`${API_BASE}/auth/register`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email, name }),

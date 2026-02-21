@@ -511,6 +511,9 @@ class AppHandler(SimpleHTTPRequestHandler):
         if path == "/api/auth/login":
             self.handle_auth_login()
             return
+        if path == "/api/auth/register":
+            self.handle_auth_register()
+            return
         if path == "/api/auth/logout":
             self.handle_auth_logout()
             return
@@ -759,42 +762,85 @@ class AppHandler(SimpleHTTPRequestHandler):
                 "SELECT id, email, name, role, auth_token FROM users WHERE email = ?",
                 (email,),
             ).fetchone()
+            if not user:
+                self.write_json(HTTPStatus.NOT_FOUND, {"error": "Neznamy uzivatel"})
+                return
+
             token = generate_auth_token()
-            if user:
-                conn.execute(
-                    """
-                    UPDATE users
-                    SET name = ?, auth_token = ?, updated_at = CURRENT_TIMESTAMP, last_login_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                    """,
-                    (name[:80], token, user["id"]),
-                )
-                conn.commit()
-                user = conn.execute(
-                    "SELECT id, email, name, role, auth_token FROM users WHERE id = ?",
-                    (user["id"],),
-                ).fetchone()
-            else:
-                users_count = conn.execute(
-                    "SELECT COUNT(*) AS c FROM users"
-                ).fetchone()["c"]
-                role = "admin" if users_count == 0 else "user"
-                user_id = generate_id("usr")
-                conn.execute(
-                    """
-                    INSERT INTO users (id, email, name, role, auth_token, last_login_at)
-                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                    """,
-                    (user_id, email, name[:80], role, token),
-                )
-                conn.commit()
-                user = conn.execute(
-                    "SELECT id, email, name, role, auth_token FROM users WHERE id = ?",
-                    (user_id,),
-                ).fetchone()
+            conn.execute(
+                """
+                UPDATE users
+                SET name = ?, auth_token = ?, updated_at = CURRENT_TIMESTAMP, last_login_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (name[:80], token, user["id"]),
+            )
+            conn.commit()
+            user = conn.execute(
+                "SELECT id, email, name, role, auth_token FROM users WHERE id = ?",
+                (user["id"],),
+            ).fetchone()
 
             self.write_json(
                 HTTPStatus.OK,
+                {
+                    "token": user["auth_token"],
+                    "user": self.serialize_user(user),
+                },
+            )
+        finally:
+            conn.close()
+
+    def handle_auth_register(self):
+        payload = self.read_json()
+        if payload is None:
+            return
+
+        email = payload.get("email")
+        name = payload.get("name")
+
+        if not isinstance(email, str) or not isinstance(name, str):
+            self.write_json(
+                HTTPStatus.BAD_REQUEST, {"error": "Invalid register payload"}
+            )
+            return
+
+        email = normalize_email(email)
+        name = normalize_name(name)
+        if not email or "@" not in email or not name:
+            self.write_json(
+                HTTPStatus.BAD_REQUEST, {"error": "Invalid register payload"}
+            )
+            return
+
+        conn = get_conn()
+        try:
+            existing = conn.execute(
+                "SELECT id FROM users WHERE email = ?",
+                (email,),
+            ).fetchone()
+            if existing:
+                self.write_json(HTTPStatus.CONFLICT, {"error": "Uzivatel uz existuje"})
+                return
+
+            users_count = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
+            role = "admin" if users_count == 0 else "user"
+            user_id = generate_id("usr")
+            token = generate_auth_token()
+            conn.execute(
+                """
+                INSERT INTO users (id, email, name, role, auth_token, last_login_at)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (user_id, email, name[:80], role, token),
+            )
+            conn.commit()
+            user = conn.execute(
+                "SELECT id, email, name, role, auth_token FROM users WHERE id = ?",
+                (user_id,),
+            ).fetchone()
+            self.write_json(
+                HTTPStatus.CREATED,
                 {
                     "token": user["auth_token"],
                     "user": self.serialize_user(user),

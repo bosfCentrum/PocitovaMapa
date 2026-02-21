@@ -54,6 +54,12 @@ h1 {
   gap: 0.45rem;
 }
 
+.auth-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.45rem;
+}
+
 .auth-form input {
   border: 1px solid #bcb9ae;
   border-radius: 8px;

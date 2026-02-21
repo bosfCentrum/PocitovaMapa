@@ -22,7 +22,10 @@
           <form id="auth-form" class="auth-form">
             <input id="auth-email" type="email" placeholder="Email" required />
             <input id="auth-name" type="text" placeholder="Jmeno" required />
-            <button type="submit" class="auth-btn">Prihlasit</button>
+            <div class="auth-actions">
+              <button type="submit" class="auth-btn">Prihlasit</button>
+              <button id="auth-register" type="button" class="auth-btn">Registrovat</button>
+            </div>
           </form>
           <div id="auth-current" class="auth-current hidden">
             <div id="auth-current-text" class="auth-current-text"></div>
