@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="cs">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Administrace - Sprava uzivatelu</title>
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="admin.css" />
+  </head>
+  <body>
+    <div class="admin-shell">
+      <header class="admin-header">
+        <div>
+          <h1>Sprava uzivatelu</h1>
+          <p class="admin-subtitle">Pripraveno pro dalsi rozsireni.</p>
+        </div>
+        <div class="admin-header-actions">
+          <a class="auth-btn" href="/admin.html">Menu administrace</a>
+          <a class="auth-btn" href="/">Zpet na mapu</a>
+        </div>
+      </header>
+
+      <p id="admin-auth-info" class="admin-auth-info">Overuji prihlaseni...</p>
+
+      <main id="admin-content" class="admin-content hidden">
+        <section class="admin-section">
+          <div class="admin-placeholder">Tato stranka zatim neobsahuje zadne nastaveni.</div>
+        </section>
+      </main>
+    </div>
+    <script src="admin-common.js"></script>
+    <script src="admin-users.js"></script>
+  </body>
+</html>

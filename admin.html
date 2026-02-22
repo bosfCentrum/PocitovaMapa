@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="cs">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Nastaveni obsahu webu</title>
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="admin.css" />
+  </head>
+  <body>
+    <div class="admin-shell">
+      <header class="admin-header">
+        <div>
+          <h1>Nastaveni obsahu webu</h1>
+          <p class="admin-subtitle">Rozcestnik administrace obsahu bez mapoveho pohledu.</p>
+        </div>
+        <a class="auth-btn" href="/">Zpet na mapu</a>
+      </header>
+
+      <p id="admin-auth-info" class="admin-auth-info">Overuji prihlaseni...</p>
+
+      <main id="admin-content" class="admin-content hidden">
+        <section class="admin-menu-grid" aria-label="Menu administrace">
+          <a class="admin-menu-card" href="/admin-buildings.html">
+            <h2>Mestske budovy</h2>
+            <p>Import pozemku s budovami z odkazu na KN.</p>
+          </a>
+          <a class="admin-menu-card" href="/admin-users.html">
+            <h2>Sprava uzivatelu</h2>
+            <p>Pripravene pro dalsi rozsireni.</p>
+          </a>
+          <a class="admin-menu-card" href="/admin-pins.html">
+            <h2>Seznam pinu a export</h2>
+            <p>Pripraveno pro pozdejsi doplneni.</p>
+          </a>
+        </section>
+      </main>
+    </div>
+    <script src="admin-common.js"></script>
+    <script src="admin.js"></script>
+  </body>
+</html>

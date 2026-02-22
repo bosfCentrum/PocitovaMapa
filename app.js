@@ -26,6 +26,17 @@ const HEX_NEUTRAL_STYLE = {
   fillOpacity: 0.12,
 };
 
+const KROVAK_EPSG2065_DEF =
+  "+proj=krovak +lat_0=49.5 +lon_0=24.8333333333333 +alpha=30.2881397222222 +k=0.9999 +x_0=0 +y_0=0 +ellps=bessel +towgs84=570.8,85.7,462.8,4.998,1.587,5.261,3.56 +units=m +no_defs";
+const KROVAK_EPSG2065_CZECH_DEF =
+  "+proj=krovak +lat_0=49.5 +lon_0=24.8333333333333 +alpha=30.2881397222222 +k=0.9999 +x_0=0 +y_0=0 +ellps=bessel +towgs84=570.8,85.7,462.8,4.998,1.587,5.261,3.56 +units=m +no_defs +czech";
+const CZECH_BOUNDS = {
+  south: 48.45,
+  north: 51.15,
+  west: 12.05,
+  east: 18.95,
+};
+
 const DEFAULT_LAYERS = [
   {
     key: HEX_OVERLAY_LAYER_KEY,
@@ -140,6 +151,9 @@ const authCurrent = document.getElementById("auth-current");
 const authCurrentText = document.getElementById("auth-current-text");
 const authLogoutButton = document.getElementById("auth-logout");
 const authNote = document.getElementById("auth-note");
+const adminMenu = document.getElementById("admin-menu");
+
+registerProjectionDefs();
 
 clearAllButton.addEventListener("click", async () => {
   if (!state.authUser || state.authUser.role !== "admin") {
@@ -275,8 +289,12 @@ function setAuth(token, user) {
 
 function refreshAuthUi() {
   const isLoggedIn = Boolean(state.authUser);
+  const isAdmin = Boolean(state.authUser && state.authUser.role === "admin");
   authForm.classList.toggle("hidden", isLoggedIn);
   authCurrent.classList.toggle("hidden", !isLoggedIn);
+  if (adminMenu) {
+    adminMenu.classList.toggle("hidden", !isAdmin);
+  }
 
   if (!isLoggedIn) {
     authCurrentText.textContent = "";
@@ -1104,21 +1122,118 @@ function clearAllStaticLayerMarkers() {
 }
 
 function addStaticPointToLayer(layerKey, point) {
-  if (!isValidStaticPoint(point)) {
+  const normalizedPoint = normalizeStaticPoint(layerKey, point);
+  if (!isValidStaticPoint(normalizedPoint)) {
     return;
   }
 
   const group = ensureLayerGroup(layerKey);
   const layerMap = state.staticLayerMarkers.get(layerKey);
-  if (!layerMap || layerMap.has(point.id)) {
+  if (!layerMap || layerMap.has(normalizedPoint.id)) {
     return;
   }
 
-  const marker = createStaticMarker(layerKey, point);
+  const marker = createStaticMarker(layerKey, normalizedPoint);
   marker.addTo(group);
-  marker.bindPopup(buildStaticPopupContent(layerKey, point));
+  marker.bindPopup(buildStaticPopupContent(layerKey, normalizedPoint));
 
-  layerMap.set(point.id, { marker, point });
+  layerMap.set(normalizedPoint.id, { marker, point: normalizedPoint });
+}
+
+function registerProjectionDefs() {
+  if (typeof window.proj4 !== "function" || typeof window.proj4.defs !== "function") {
+    return;
+  }
+  if (!window.proj4.defs("EPSG:2065")) {
+    window.proj4.defs("EPSG:2065", KROVAK_EPSG2065_DEF);
+  }
+  if (!window.proj4.defs("EPSG:2065_CZECH")) {
+    window.proj4.defs("EPSG:2065_CZECH", KROVAK_EPSG2065_CZECH_DEF);
+  }
+}
+
+function normalizeStaticPoint(layerKey, point) {
+  if (!point || typeof point !== "object") {
+    return point;
+  }
+  if (typeof point.lat === "number" && typeof point.lng === "number") {
+    return point;
+  }
+  if (layerKey !== "city_buildings" || typeof window.proj4 !== "function") {
+    return point;
+  }
+
+  const sourceY = Number(point?.data?.krovak_y);
+  const sourceX = Number(point?.data?.krovak_x);
+  if (!Number.isFinite(sourceY) || !Number.isFinite(sourceX)) {
+    return point;
+  }
+
+  const converted = convertKrovakToWgs84(sourceY, sourceX);
+  if (!converted) {
+    return point;
+  }
+  return {
+    ...point,
+    lat: converted.lat,
+    lng: converted.lng,
+  };
+}
+
+function convertKrovakToWgs84(sourceY, sourceX) {
+  const projectionCodes = ["EPSG:2065", "EPSG:2065_CZECH"];
+  const variants = [
+    [sourceX, sourceY],
+    [sourceY, sourceX],
+    [-sourceX, -sourceY],
+    [-sourceY, -sourceX],
+    [sourceX, -sourceY],
+    [-sourceX, sourceY],
+    [sourceY, -sourceX],
+    [-sourceY, sourceX],
+  ];
+
+  let bestCandidate = null;
+  projectionCodes.forEach((projectionCode) => {
+    variants.forEach(([x, y]) => {
+      try {
+        const [lng, lat] = window.proj4(projectionCode, "WGS84", [x, y]);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+          return;
+        }
+        const score = coordinateScore(lat, lng);
+        if (score === 0) {
+          return;
+        }
+        if (!bestCandidate || score > bestCandidate.score) {
+          bestCandidate = { lat, lng, score };
+        }
+      } catch {
+        // Try next variant.
+      }
+    });
+  });
+
+  return bestCandidate;
+}
+
+function coordinateScore(lat, lng) {
+  if (isInsideBounds(lat, lng, HUSTOPECE_OVERLAY_BOUNDS, 0.2)) {
+    return 3;
+  }
+  if (isInsideBounds(lat, lng, CZECH_BOUNDS, 0)) {
+    return 2;
+  }
+  return 0;
+}
+
+function isInsideBounds(lat, lng, bounds, padding) {
+  return (
+    lat >= bounds.south - padding &&
+    lat <= bounds.north + padding &&
+    lng >= bounds.west - padding &&
+    lng <= bounds.east + padding
+  );
 }
 
 function createStaticMarker(layerKey, point) {
@@ -1247,8 +1362,8 @@ function isValidPin(pin) {
 function isValidStaticPoint(point) {
   return (
     typeof point?.id === "string" &&
-    typeof point?.lat === "number" &&
-    typeof point?.lng === "number"
+    Number.isFinite(point?.lat) &&
+    Number.isFinite(point?.lng)
   );
 }
 

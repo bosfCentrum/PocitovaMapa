@@ -1,12 +1,17 @@
 ﻿
 import json
 import os
+import re
 import secrets
 import sqlite3
+import unicodedata
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from html import unescape
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.error import URLError
+from urllib.parse import urljoin, urlparse
+from urllib.request import Request, urlopen
 
 
 ROOT = Path(__file__).resolve().parent
@@ -22,6 +27,7 @@ SEED_IF_EMPTY = os.environ.get("SEED_IF_EMPTY", "1").strip().lower() not in (
 )
 
 FEELINGS_LAYER_KEY = "feelings"
+CITY_BUILDINGS_LAYER_KEY = "city_buildings"
 
 DEFAULT_LAYERS = [
     {
@@ -33,7 +39,7 @@ DEFAULT_LAYERS = [
         "sort_order": 10,
     },
     {
-        "key": "city_buildings",
+        "key": CITY_BUILDINGS_LAYER_KEY,
         "name": "Mestske budovy",
         "kind": "static",
         "allow_user_points": 0,
@@ -52,9 +58,11 @@ def init_db() -> None:
         conn.execute(create_pins_table_sql())
         conn.execute(create_layers_table_sql())
         conn.execute(create_layer_points_table_sql())
+        conn.execute(create_city_building_parcels_table_sql())
         migrate_pins_table(conn)
         migrate_layers_table(conn)
         migrate_layer_points_table(conn)
+        migrate_city_building_parcels_table(conn)
         ensure_default_layers(conn)
         migrate_pins_to_layer_points(conn)
         seed_from_file_if_needed(conn)
@@ -129,6 +137,26 @@ def create_layer_points_table_sql() -> str:
           updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           FOREIGN KEY (layer_key) REFERENCES layers(key),
           FOREIGN KEY (created_by_user_id) REFERENCES users(id)
+        )
+    """
+
+
+def create_city_building_parcels_table_sql() -> str:
+    return """
+        CREATE TABLE IF NOT EXISTS city_building_parcels (
+          id TEXT PRIMARY KEY,
+          source_url TEXT NOT NULL,
+          parcel_label TEXT NOT NULL,
+          parcel_url TEXT NOT NULL UNIQUE,
+          building_object_url TEXT NOT NULL DEFAULT '',
+          object_type TEXT NOT NULL DEFAULT '',
+          street TEXT NOT NULL DEFAULT '',
+          address TEXT NOT NULL DEFAULT '',
+          krovak_y REAL,
+          krovak_x REAL,
+          has_building INTEGER NOT NULL DEFAULT 1,
+          imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """
 
@@ -219,6 +247,58 @@ def migrate_layer_points_table(conn: sqlite3.Connection) -> None:
         )
     if "created_from_ip" not in columns:
         conn.execute("ALTER TABLE layer_points ADD COLUMN created_from_ip TEXT")
+
+
+def migrate_city_building_parcels_table(conn: sqlite3.Connection) -> None:
+    columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info('city_building_parcels')").fetchall()
+        if row["name"]
+    }
+    if "source_url" not in columns:
+        conn.execute(
+            "ALTER TABLE city_building_parcels ADD COLUMN source_url TEXT NOT NULL DEFAULT ''"
+        )
+    if "parcel_label" not in columns:
+        conn.execute(
+            "ALTER TABLE city_building_parcels ADD COLUMN parcel_label TEXT NOT NULL DEFAULT ''"
+        )
+    if "parcel_url" not in columns:
+        conn.execute(
+            "ALTER TABLE city_building_parcels ADD COLUMN parcel_url TEXT NOT NULL DEFAULT ''"
+        )
+    if "building_object_url" not in columns:
+        conn.execute(
+            "ALTER TABLE city_building_parcels ADD COLUMN building_object_url TEXT NOT NULL DEFAULT ''"
+        )
+    if "object_type" not in columns:
+        conn.execute(
+            "ALTER TABLE city_building_parcels ADD COLUMN object_type TEXT NOT NULL DEFAULT ''"
+        )
+    if "street" not in columns:
+        conn.execute(
+            "ALTER TABLE city_building_parcels ADD COLUMN street TEXT NOT NULL DEFAULT ''"
+        )
+    if "address" not in columns:
+        conn.execute(
+            "ALTER TABLE city_building_parcels ADD COLUMN address TEXT NOT NULL DEFAULT ''"
+        )
+    if "krovak_y" not in columns:
+        conn.execute("ALTER TABLE city_building_parcels ADD COLUMN krovak_y REAL")
+    if "krovak_x" not in columns:
+        conn.execute("ALTER TABLE city_building_parcels ADD COLUMN krovak_x REAL")
+    if "has_building" not in columns:
+        conn.execute(
+            "ALTER TABLE city_building_parcels ADD COLUMN has_building INTEGER NOT NULL DEFAULT 1"
+        )
+    if "imported_at" not in columns:
+        conn.execute(
+            "ALTER TABLE city_building_parcels ADD COLUMN imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"
+        )
+    if "updated_at" not in columns:
+        conn.execute(
+            "ALTER TABLE city_building_parcels ADD COLUMN updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"
+        )
 
 
 def ensure_default_layers(conn: sqlite3.Connection) -> None:
@@ -415,6 +495,199 @@ def safe_json_dump(value) -> str | None:
         return None
 
 
+def normalize_text(value: str) -> str:
+    lowered = value.lower()
+    normalized = unicodedata.normalize("NFKD", lowered)
+    without_accents = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    return " ".join(without_accents.split())
+
+
+def clean_html_text(value: str) -> str:
+    plain = re.sub(r"<[^>]+>", " ", value)
+    return " ".join(unescape(plain).split())
+
+
+def extract_parcel_number(value: str) -> str | None:
+    patterns = (
+        r"\bst\.\s*\d+(?:/\d+)?\b",
+        r"\b\d+/\d+\b",
+        r"\b\d+\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, value, flags=re.IGNORECASE)
+        if match:
+            return " ".join(match.group(0).split())
+    return None
+
+
+def parse_building_parcels_from_html(html_text: str, source_url: str) -> list[dict]:
+    positive_phrase = "pozemku je stavba"
+    block_pattern = re.compile(
+        r"<tr\b[^>]*>.*?</tr>|<li\b[^>]*>.*?</li>",
+        re.IGNORECASE | re.DOTALL,
+    )
+    anchor_pattern = re.compile(
+        r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>',
+        re.IGNORECASE | re.DOTALL,
+    )
+    results_by_url: dict[str, dict] = {}
+
+    def add_candidate(href: str, raw_label: str, fallback_text: str) -> None:
+        absolute_url = urljoin(source_url, unescape(href.strip()))
+        if not absolute_url.lower().startswith(("http://", "https://")):
+            return
+
+        label_text = clean_html_text(raw_label)
+        parcel_number = extract_parcel_number(label_text)
+        if not parcel_number:
+            parcel_number = extract_parcel_number(fallback_text)
+        if not parcel_number:
+            return
+
+        existing = results_by_url.get(absolute_url)
+        candidate = {
+            "parcel_label": parcel_number[:200],
+            "parcel_url": absolute_url[:800],
+        }
+        if not existing:
+            results_by_url[absolute_url] = candidate
+
+    def block_matches_target(text: str) -> bool:
+        normalized = normalize_text(text)
+        return positive_phrase in normalized
+
+    for block_html in block_pattern.findall(html_text):
+        block_text = clean_html_text(block_html)
+        if not block_matches_target(block_text):
+            continue
+        anchors = anchor_pattern.findall(block_html)
+        for href, label in anchors:
+            add_candidate(href, label, block_text)
+
+    if not results_by_url:
+        for anchor_match in anchor_pattern.finditer(html_text):
+            start = max(0, anchor_match.start() - 700)
+            end = min(len(html_text), anchor_match.end() + 700)
+            context_text = clean_html_text(html_text[start:end])
+            if not block_matches_target(context_text):
+                continue
+            add_candidate(anchor_match.group(1), anchor_match.group(2), context_text)
+
+    return list(results_by_url.values())
+
+
+def fetch_remote_html(url: str) -> str:
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (compatible; PocitovaMapaBot/1.0; +https://example.invalid)"
+        },
+        method="GET",
+    )
+    with urlopen(request, timeout=15) as response:
+        raw = response.read()
+        content_type = response.headers.get("Content-Type", "")
+    content_type_normalized = content_type.lower()
+    if "charset=" in content_type_normalized:
+        charset = content_type_normalized.split("charset=", 1)[1].split(";", 1)[0].strip()
+        for encoding in (charset, "utf-8", "windows-1250", "cp1250", "latin-1"):
+            try:
+                return raw.decode(encoding)
+            except (LookupError, UnicodeDecodeError):
+                continue
+    for encoding in ("utf-8", "windows-1250", "cp1250", "latin-1"):
+        try:
+            return raw.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def parse_building_detail_from_parcel_html(html_text: str, parcel_url: str) -> dict:
+    row_pattern = re.compile(r"<tr\b[^>]*>.*?</tr>", re.IGNORECASE | re.DOTALL)
+    cell_pattern = re.compile(r"<t[dh]\b[^>]*>(.*?)</t[dh]>", re.IGNORECASE | re.DOTALL)
+    anchor_pattern = re.compile(
+        r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>',
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    building_object_url = ""
+    building_number = ""
+    object_type = ""
+    street = ""
+
+    for row_html in row_pattern.findall(html_text):
+        cells = cell_pattern.findall(row_html)
+        if len(cells) < 2:
+            continue
+        label = normalize_text(clean_html_text(cells[0]))
+
+        if "budova s cislem popisnym" in label:
+            detail_cell = cells[-1]
+            detail_text = clean_html_text(detail_cell)
+            if ";" in detail_text:
+                left, right = detail_text.split(";", 1)
+                building_number = left.strip()
+                object_type = right.strip()
+            else:
+                building_number = detail_text.strip()
+
+        if "budova bez cisla popisneho nebo evidencniho" in label:
+            detail_cell = cells[-1]
+            detail_text = clean_html_text(detail_cell)
+            if detail_text:
+                object_type = detail_text.strip()
+
+        if "stavebni objekt" in label:
+            for cell in cells[1:]:
+                anchor = anchor_pattern.search(cell)
+                if not anchor:
+                    continue
+                building_object_url = urljoin(parcel_url, unescape(anchor.group(1).strip()))
+                if not building_number:
+                    building_number = clean_html_text(anchor.group(2)).strip()
+                break
+
+        if label.startswith("ulice"):
+            street = clean_html_text(cells[1]).strip()
+
+    address_parts = [part for part in (street, building_number) if part]
+    address = " ".join(address_parts).strip()
+
+    return {
+        "building_object_url": building_object_url[:800],
+        "object_type": object_type[:200],
+        "street": street[:200],
+        "address": address[:260],
+    }
+
+
+def parse_krovak_coordinates_from_object_html(html_text: str) -> tuple[float | None, float | None]:
+    normalized = html_text.replace("&nbsp;", " ").replace("\xa0", " ")
+    match = re.search(
+        r"Y:\s*([0-9\.\,\-\s]+)\s*X:\s*([0-9\.\,\-\s]+)",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None, None
+
+    def parse_number(value: str) -> float | None:
+        compact = value.replace(" ", "").replace("\u202f", "").replace("\u00a0", "")
+        if compact.count(",") == 1 and compact.count(".") > 1:
+            compact = compact.replace(".", "").replace(",", ".")
+        else:
+            compact = compact.replace(",", ".")
+        try:
+            return float(compact)
+        except ValueError:
+            return None
+
+    y = parse_number(match.group(1))
+    x = parse_number(match.group(2))
+    return y, x
+
+
 def is_valid_seed_layer(layer: object) -> bool:
     if not isinstance(layer, dict):
         return False
@@ -480,6 +753,9 @@ class AppHandler(SimpleHTTPRequestHandler):
         if path == "/healthz":
             self.write_json(HTTPStatus.OK, {"status": "ok"})
             return
+        if path == "/api/admin/buildings/parcels":
+            self.handle_get_admin_building_parcels()
+            return
         if path == "/api/pins":
             self.handle_get_pins()
             return
@@ -499,6 +775,12 @@ class AppHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if path == "/api/admin/buildings/parcels/import-html":
+            self.handle_import_admin_building_parcels_html()
+            return
+        if path == "/api/admin/buildings/parcels/refresh-coordinates":
+            self.handle_refresh_admin_building_coordinates()
+            return
         if path == "/api/pins":
             self.handle_create_pin()
             return
@@ -532,6 +814,9 @@ class AppHandler(SimpleHTTPRequestHandler):
 
     def do_DELETE(self):
         path = urlparse(self.path).path
+        if path == "/api/admin/buildings/parcels":
+            self.handle_delete_admin_building_parcels()
+            return
         if path == "/api/pins":
             self.handle_delete_all_pins()
             return
@@ -727,6 +1012,50 @@ class AppHandler(SimpleHTTPRequestHandler):
             "role": user_row["role"],
         }
 
+    def serialize_admin_building_parcel(self, row):
+        return {
+            "id": row["id"],
+            "source_url": row["source_url"],
+            "parcel_label": row["parcel_label"],
+            "parcel_url": row["parcel_url"],
+            "building_object_url": row["building_object_url"],
+            "object_type": row["object_type"],
+            "street": row["street"],
+            "address": row["address"],
+            "krovak_y": row["krovak_y"],
+            "krovak_x": row["krovak_x"],
+            "has_building": bool(row["has_building"]),
+            "imported_at": row["imported_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def serialize_city_building_layer_point(self, row):
+        data = {
+            "parcel_url": row["parcel_url"],
+            "building_object_url": row["building_object_url"],
+            "object_type": row["object_type"],
+            "street": row["street"],
+            "address": row["address"],
+            "krovak_y": row["krovak_y"],
+            "krovak_x": row["krovak_x"],
+        }
+        return {
+            "id": row["id"],
+            "layer_key": CITY_BUILDINGS_LAYER_KEY,
+            "lat": None,
+            "lng": None,
+            "title": row["parcel_label"],
+            "description": row["object_type"] or row["address"] or "",
+            "data": data,
+            "created_by_name": "Import",
+            "created_at": row["updated_at"] or row["imported_at"],
+            "type": "",
+            "comment": "",
+            "is_owner": False,
+            "can_edit": False,
+            "can_delete": False,
+        }
+
     def handle_auth_me(self):
         conn = get_conn()
         try:
@@ -879,6 +1208,33 @@ class AppHandler(SimpleHTTPRequestHandler):
         finally:
             conn.close()
 
+    def handle_get_admin_building_parcels(self):
+        conn = get_conn()
+        try:
+            conn.execute(create_city_building_parcels_table_sql())
+            migrate_city_building_parcels_table(conn)
+            auth_user = self.get_auth_user(conn)
+            if not auth_user:
+                self.write_json(HTTPStatus.UNAUTHORIZED, {"error": "Login required"})
+                return
+            if not self.is_admin(auth_user):
+                self.write_json(HTTPStatus.FORBIDDEN, {"error": "Admin only"})
+                return
+
+            rows = conn.execute(
+                """
+                SELECT id, source_url, parcel_label, parcel_url, building_object_url,
+                       object_type, street, address, krovak_y, krovak_x,
+                       has_building, imported_at, updated_at
+                FROM city_building_parcels
+                ORDER BY updated_at DESC, parcel_label COLLATE NOCASE ASC
+                """,
+            ).fetchall()
+            parcels = [self.serialize_admin_building_parcel(row) for row in rows]
+            self.write_json(HTTPStatus.OK, {"parcels": parcels})
+        finally:
+            conn.close()
+
     def handle_get_layer_points(self, layer_key: str):
         conn = get_conn()
         try:
@@ -886,6 +1242,23 @@ class AppHandler(SimpleHTTPRequestHandler):
             layer = self.get_layer(conn, layer_key)
             if not layer or not bool(layer["is_enabled"]):
                 self.write_json(HTTPStatus.NOT_FOUND, {"error": "Layer not found"})
+                return
+
+            if layer_key == CITY_BUILDINGS_LAYER_KEY:
+                conn.execute(create_city_building_parcels_table_sql())
+                migrate_city_building_parcels_table(conn)
+                rows = conn.execute(
+                    """
+                    SELECT id, parcel_label, parcel_url, building_object_url,
+                           object_type, street, address, krovak_y, krovak_x,
+                           imported_at, updated_at
+                    FROM city_building_parcels
+                    WHERE has_building = 1
+                    ORDER BY updated_at DESC, parcel_label COLLATE NOCASE ASC
+                    """
+                ).fetchall()
+                points = [self.serialize_city_building_layer_point(row) for row in rows]
+                self.write_json(HTTPStatus.OK, {"points": points})
                 return
 
             rows = conn.execute(
@@ -1099,6 +1472,208 @@ class AppHandler(SimpleHTTPRequestHandler):
         finally:
             conn.close()
 
+    def handle_import_admin_building_parcels_html(self):
+        payload = self.read_json()
+        if payload is None:
+            return
+
+        html_source = payload.get("html", "")
+        source_url = payload.get("source_url", "https://nahlizenidokn.cuzk.gov.cz/")
+        if not isinstance(html_source, str) or not html_source.strip():
+            self.write_json(HTTPStatus.BAD_REQUEST, {"error": "Chybi HTML obsah"})
+            return
+        if len(html_source) > 7_000_000:
+            self.write_json(HTTPStatus.BAD_REQUEST, {"error": "HTML soubor je prilis velky"})
+            return
+        if not isinstance(source_url, str):
+            source_url = "https://nahlizenidokn.cuzk.gov.cz/"
+        source_url = source_url.strip() or "https://nahlizenidokn.cuzk.gov.cz/"
+        if not source_url.startswith(("http://", "https://")):
+            source_url = "https://nahlizenidokn.cuzk.gov.cz/"
+
+        conn = get_conn()
+        try:
+            conn.execute(create_city_building_parcels_table_sql())
+            migrate_city_building_parcels_table(conn)
+            auth_user = self.get_auth_user(conn)
+            if not auth_user:
+                self.write_json(HTTPStatus.UNAUTHORIZED, {"error": "Login required"})
+                return
+            if not self.is_admin(auth_user):
+                self.write_json(HTTPStatus.FORBIDDEN, {"error": "Admin only"})
+                return
+            parsed_parcels = parse_building_parcels_from_html(html_source, source_url)
+            if not parsed_parcels:
+                self.write_json(
+                    HTTPStatus.UNPROCESSABLE_ENTITY,
+                    {"error": "Na strance nebyly nalezeny pozemky se stavbou"},
+                )
+                return
+
+            enriched_parcels = []
+            enrichment_failures = 0
+            coordinate_failures = 0
+            for parcel in parsed_parcels:
+                details = {
+                    "building_object_url": "",
+                    "object_type": "",
+                    "street": "",
+                    "address": "",
+                    "krovak_y": None,
+                    "krovak_x": None,
+                }
+                try:
+                    detail_html = fetch_remote_html(parcel["parcel_url"])
+                    details = parse_building_detail_from_parcel_html(
+                        detail_html, parcel["parcel_url"]
+                    )
+                    details["krovak_y"] = None
+                    details["krovak_x"] = None
+                    if details.get("building_object_url"):
+                        try:
+                            object_html = fetch_remote_html(details["building_object_url"])
+                            y, x = parse_krovak_coordinates_from_object_html(object_html)
+                            details["krovak_y"] = y
+                            details["krovak_x"] = x
+                            if y is None or x is None:
+                                coordinate_failures += 1
+                        except URLError:
+                            coordinate_failures += 1
+                        except TimeoutError:
+                            coordinate_failures += 1
+                except URLError:
+                    enrichment_failures += 1
+                except TimeoutError:
+                    enrichment_failures += 1
+
+                enriched_parcels.append(
+                    {
+                        **parcel,
+                        **details,
+                    }
+                )
+
+            inserted_count, updated_count = self.upsert_admin_building_parcels(
+                conn, enriched_parcels, source_url
+            )
+            conn.commit()
+            self.write_json(
+                HTTPStatus.OK,
+                {
+                    "imported": len(enriched_parcels),
+                    "inserted": inserted_count,
+                    "updated": updated_count,
+                    "detail_failures": enrichment_failures,
+                    "coordinate_failures": coordinate_failures,
+                },
+            )
+        finally:
+            conn.close()
+
+    def upsert_admin_building_parcels(
+        self, conn: sqlite3.Connection, parsed_parcels: list[dict], source_url: str
+    ) -> tuple[int, int]:
+        inserted_count = 0
+        updated_count = 0
+        for parcel in parsed_parcels:
+            existing = conn.execute(
+                "SELECT id FROM city_building_parcels WHERE parcel_url = ?",
+                (parcel["parcel_url"],),
+            ).fetchone()
+            if existing:
+                updated_count += 1
+            else:
+                inserted_count += 1
+
+            conn.execute(
+                """
+                INSERT INTO city_building_parcels (
+                    id, source_url, parcel_label, parcel_url,
+                    building_object_url, object_type, street, address,
+                    krovak_y, krovak_x, has_building
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                ON CONFLICT(parcel_url) DO UPDATE SET
+                    source_url = excluded.source_url,
+                    parcel_label = excluded.parcel_label,
+                    building_object_url = excluded.building_object_url,
+                    object_type = excluded.object_type,
+                    street = excluded.street,
+                    address = excluded.address,
+                    krovak_y = excluded.krovak_y,
+                    krovak_x = excluded.krovak_x,
+                    has_building = 1,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    existing["id"] if existing else generate_id("parcel"),
+                    source_url[:800],
+                    parcel["parcel_label"][:200],
+                    parcel["parcel_url"][:800],
+                    str(parcel.get("building_object_url", ""))[:800],
+                    str(parcel.get("object_type", ""))[:200],
+                    str(parcel.get("street", ""))[:200],
+                    str(parcel.get("address", ""))[:260],
+                    parcel.get("krovak_y"),
+                    parcel.get("krovak_x"),
+                ),
+            )
+        return inserted_count, updated_count
+
+    def handle_refresh_admin_building_coordinates(self):
+        conn = get_conn()
+        try:
+            conn.execute(create_city_building_parcels_table_sql())
+            migrate_city_building_parcels_table(conn)
+            auth_user = self.get_auth_user(conn)
+            if not self.is_admin(auth_user):
+                self.write_json(HTTPStatus.FORBIDDEN, {"error": "Admin only"})
+                return
+
+            rows = conn.execute(
+                """
+                SELECT id, building_object_url
+                FROM city_building_parcels
+                ORDER BY updated_at DESC, parcel_label COLLATE NOCASE ASC
+                """
+            ).fetchall()
+
+            updated = 0
+            failed = 0
+            skipped = 0
+            for row in rows:
+                object_url = row["building_object_url"]
+                if not isinstance(object_url, str) or not object_url.strip():
+                    skipped += 1
+                    continue
+                try:
+                    object_html = fetch_remote_html(object_url)
+                    y, x = parse_krovak_coordinates_from_object_html(object_html)
+                    if y is None or x is None:
+                        failed += 1
+                        continue
+                    conn.execute(
+                        """
+                        UPDATE city_building_parcels
+                        SET krovak_y = ?, krovak_x = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                        """,
+                        (y, x, row["id"]),
+                    )
+                    updated += 1
+                except URLError:
+                    failed += 1
+                except TimeoutError:
+                    failed += 1
+
+            conn.commit()
+            self.write_json(
+                HTTPStatus.OK,
+                {"updated": updated, "failed": failed, "skipped": skipped},
+            )
+        finally:
+            conn.close()
+
     def handle_delete_all_pins(self):
         conn = get_conn()
         try:
@@ -1109,6 +1684,21 @@ class AppHandler(SimpleHTTPRequestHandler):
             cursor = conn.execute(
                 "DELETE FROM layer_points WHERE layer_key = ?", (FEELINGS_LAYER_KEY,)
             )
+            conn.commit()
+            self.write_json(HTTPStatus.OK, {"deleted": cursor.rowcount})
+        finally:
+            conn.close()
+
+    def handle_delete_admin_building_parcels(self):
+        conn = get_conn()
+        try:
+            conn.execute(create_city_building_parcels_table_sql())
+            migrate_city_building_parcels_table(conn)
+            auth_user = self.get_auth_user(conn)
+            if not self.is_admin(auth_user):
+                self.write_json(HTTPStatus.FORBIDDEN, {"error": "Admin only"})
+                return
+            cursor = conn.execute("DELETE FROM city_building_parcels")
             conn.commit()
             self.write_json(HTTPStatus.OK, {"deleted": cursor.rowcount})
         finally:

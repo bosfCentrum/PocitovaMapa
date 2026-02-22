@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="cs">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Administrace - Mestske budovy</title>
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="admin.css" />
+  </head>
+  <body>
+    <div class="admin-shell">
+      <header class="admin-header">
+        <div>
+          <h1>Mestske budovy</h1>
+          <p class="admin-subtitle">Import pozemku s budovami z nahlizeni do KN.</p>
+        </div>
+        <div class="admin-header-actions">
+          <a class="auth-btn" href="/admin.html">Menu administrace</a>
+          <a class="auth-btn" href="/">Zpet na mapu</a>
+        </div>
+      </header>
+
+      <p id="admin-auth-info" class="admin-auth-info">Overuji prihlaseni...</p>
+
+      <main id="admin-content" class="admin-content hidden">
+        <section class="admin-section">
+          <form id="parcel-import-file-form" class="admin-import-form">
+            <label for="parcel-source-file">Import z ulozeneho HTML souboru (doporuceno)</label>
+            <div class="admin-import-row">
+              <input
+                id="parcel-source-file"
+                class="admin-import-input"
+                type="file"
+                accept=".html,.htm,text/html"
+                required
+              />
+              <button class="auth-btn" type="submit">Nahrat HTML a importovat</button>
+            </div>
+            <p id="parcel-import-file-note" class="admin-import-note"></p>
+          </form>
+          <div class="admin-import-actions">
+            <button id="parcel-delete-all-btn" class="danger-btn" type="button">
+              Smazat vsechny pozemky
+            </button>
+            <button id="parcel-refresh-coords-btn" class="auth-btn" type="button">
+              Doplnit souradnice
+            </button>
+            <p id="parcel-actions-note" class="admin-import-note"></p>
+          </div>
+
+          <div class="admin-table-wrap">
+            <table class="admin-table">
+              <thead>
+                <tr>
+                  <th>Pozemek</th>
+                  <th>Odkaz v katastru</th>
+                  <th>Stavebni objekt</th>
+                  <th>Typ objektu</th>
+                  <th>Adresa</th>
+                  <th>Souradnice (EPSG:2065)</th>
+                </tr>
+              </thead>
+              <tbody id="parcels-table-body">
+                <tr>
+                  <td colspan="6">Nacitam pozemky...</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script src="admin-common.js"></script>
+    <script src="admin-buildings.js"></script>
+  </body>
+</html>

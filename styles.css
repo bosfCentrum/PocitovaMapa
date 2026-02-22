@@ -75,6 +75,12 @@ h1 {
   cursor: pointer;
 }
 
+.admin-link-btn {
+  display: block;
+  text-align: center;
+  text-decoration: none;
+}
+
 .auth-current {
   display: grid;
   gap: 0.45rem;
