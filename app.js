@@ -26,17 +26,6 @@ const HEX_NEUTRAL_STYLE = {
   fillOpacity: 0.12,
 };
 
-const KROVAK_EPSG2065_DEF =
-  "+proj=krovak +lat_0=49.5 +lon_0=24.8333333333333 +alpha=30.2881397222222 +k=0.9999 +x_0=0 +y_0=0 +ellps=bessel +towgs84=570.8,85.7,462.8,4.998,1.587,5.261,3.56 +units=m +no_defs";
-const KROVAK_EPSG2065_CZECH_DEF =
-  "+proj=krovak +lat_0=49.5 +lon_0=24.8333333333333 +alpha=30.2881397222222 +k=0.9999 +x_0=0 +y_0=0 +ellps=bessel +towgs84=570.8,85.7,462.8,4.998,1.587,5.261,3.56 +units=m +no_defs +czech";
-const CZECH_BOUNDS = {
-  south: 48.45,
-  north: 51.15,
-  west: 12.05,
-  east: 18.95,
-};
-
 const DEFAULT_LAYERS = [
   {
     key: HEX_OVERLAY_LAYER_KEY,
@@ -152,8 +141,6 @@ const authCurrentText = document.getElementById("auth-current-text");
 const authLogoutButton = document.getElementById("auth-logout");
 const authNote = document.getElementById("auth-note");
 const adminMenu = document.getElementById("admin-menu");
-
-registerProjectionDefs();
 
 clearAllButton.addEventListener("click", async () => {
   if (!state.authUser || state.authUser.role !== "admin") {
@@ -1140,100 +1127,11 @@ function addStaticPointToLayer(layerKey, point) {
   layerMap.set(normalizedPoint.id, { marker, point: normalizedPoint });
 }
 
-function registerProjectionDefs() {
-  if (typeof window.proj4 !== "function" || typeof window.proj4.defs !== "function") {
-    return;
-  }
-  if (!window.proj4.defs("EPSG:2065")) {
-    window.proj4.defs("EPSG:2065", KROVAK_EPSG2065_DEF);
-  }
-  if (!window.proj4.defs("EPSG:2065_CZECH")) {
-    window.proj4.defs("EPSG:2065_CZECH", KROVAK_EPSG2065_CZECH_DEF);
-  }
-}
-
-function normalizeStaticPoint(layerKey, point) {
+function normalizeStaticPoint(_layerKey, point) {
   if (!point || typeof point !== "object") {
     return point;
   }
-  if (typeof point.lat === "number" && typeof point.lng === "number") {
-    return point;
-  }
-  if (layerKey !== "city_buildings" || typeof window.proj4 !== "function") {
-    return point;
-  }
-
-  const sourceY = Number(point?.data?.krovak_y);
-  const sourceX = Number(point?.data?.krovak_x);
-  if (!Number.isFinite(sourceY) || !Number.isFinite(sourceX)) {
-    return point;
-  }
-
-  const converted = convertKrovakToWgs84(sourceY, sourceX);
-  if (!converted) {
-    return point;
-  }
-  return {
-    ...point,
-    lat: converted.lat,
-    lng: converted.lng,
-  };
-}
-
-function convertKrovakToWgs84(sourceY, sourceX) {
-  const projectionCodes = ["EPSG:2065", "EPSG:2065_CZECH"];
-  const variants = [
-    [sourceX, sourceY],
-    [sourceY, sourceX],
-    [-sourceX, -sourceY],
-    [-sourceY, -sourceX],
-    [sourceX, -sourceY],
-    [-sourceX, sourceY],
-    [sourceY, -sourceX],
-    [-sourceY, sourceX],
-  ];
-
-  let bestCandidate = null;
-  projectionCodes.forEach((projectionCode) => {
-    variants.forEach(([x, y]) => {
-      try {
-        const [lng, lat] = window.proj4(projectionCode, "WGS84", [x, y]);
-        if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-          return;
-        }
-        const score = coordinateScore(lat, lng);
-        if (score === 0) {
-          return;
-        }
-        if (!bestCandidate || score > bestCandidate.score) {
-          bestCandidate = { lat, lng, score };
-        }
-      } catch {
-        // Try next variant.
-      }
-    });
-  });
-
-  return bestCandidate;
-}
-
-function coordinateScore(lat, lng) {
-  if (isInsideBounds(lat, lng, HUSTOPECE_OVERLAY_BOUNDS, 0.2)) {
-    return 3;
-  }
-  if (isInsideBounds(lat, lng, CZECH_BOUNDS, 0)) {
-    return 2;
-  }
-  return 0;
-}
-
-function isInsideBounds(lat, lng, bounds, padding) {
-  return (
-    lat >= bounds.south - padding &&
-    lat <= bounds.north + padding &&
-    lng >= bounds.west - padding &&
-    lng <= bounds.east + padding
-  );
+  return point;
 }
 
 function createStaticMarker(layerKey, point) {
@@ -1259,6 +1157,56 @@ function createStaticMarker(layerKey, point) {
 function buildStaticPopupContent(layerKey, point) {
   const layer = state.availableLayers.get(layerKey);
   const container = document.createElement("div");
+  const isCityBuildingLayer = layerKey === "city_buildings";
+  const pointData = point.data && typeof point.data === "object" ? point.data : {};
+
+  if (isCityBuildingLayer) {
+    const addressText =
+      typeof pointData.address === "string" && pointData.address.trim()
+        ? pointData.address.trim()
+        : point.title || layer?.name || "Budova";
+    const objectTypeText =
+      typeof pointData.object_type === "string" && pointData.object_type.trim()
+        ? pointData.object_type.trim()
+        : point.description || "-";
+    const parcelNumberText =
+      typeof point.title === "string" && point.title.trim() ? point.title.trim() : "-";
+
+    const heading = document.createElement("div");
+    heading.className = "pin-author";
+    heading.style.fontWeight = "700";
+    heading.style.color = "#1f2f40";
+    heading.textContent = addressText;
+    container.appendChild(heading);
+
+    const objectTypeRow = document.createElement("div");
+    objectTypeRow.className = "pin-author";
+    objectTypeRow.textContent = `Typ objektu: ${objectTypeText}`;
+    container.appendChild(objectTypeRow);
+
+    const parcelNumberRow = document.createElement("div");
+    parcelNumberRow.className = "pin-author";
+    parcelNumberRow.textContent = `Cislo pozemku: ${parcelNumberText}`;
+    container.appendChild(parcelNumberRow);
+
+    const objectUrl = String(pointData.building_object_url || "").trim();
+    if (/^https?:\/\//i.test(objectUrl)) {
+      const detailRow = document.createElement("div");
+      detailRow.className = "pin-author";
+      detailRow.textContent = "Detail budovy: ";
+
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = "Otevrit odkaz";
+      detailRow.appendChild(link);
+
+      container.appendChild(detailRow);
+    }
+
+    return container;
+  }
 
   const title = document.createElement("div");
   title.className = "pin-label neutral";
@@ -1272,9 +1220,10 @@ function buildStaticPopupContent(layerKey, point) {
     container.appendChild(desc);
   }
 
-  if (point.data && typeof point.data === "object") {
-    Object.entries(point.data).forEach(([key, value]) => {
+  if (pointData && typeof pointData === "object") {
+    Object.entries(pointData).forEach(([key, value]) => {
       if (value == null || value === "") return;
+
       const row = document.createElement("div");
       row.className = "pin-author";
       row.textContent = `${prettifyCategoryLabel(key)}: ${String(value)}`;

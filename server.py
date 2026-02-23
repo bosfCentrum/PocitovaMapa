@@ -1,5 +1,6 @@
 ﻿
 import json
+import math
 import os
 import re
 import secrets
@@ -28,6 +29,18 @@ SEED_IF_EMPTY = os.environ.get("SEED_IF_EMPTY", "1").strip().lower() not in (
 
 FEELINGS_LAYER_KEY = "feelings"
 CITY_BUILDINGS_LAYER_KEY = "city_buildings"
+HUSTOPECE_BOUNDS = {
+    "south": 48.928,
+    "north": 48.956,
+    "west": 16.713,
+    "east": 16.758,
+}
+CZECH_BOUNDS = {
+    "south": 48.45,
+    "north": 51.15,
+    "west": 12.05,
+    "east": 18.95,
+}
 
 DEFAULT_LAYERS = [
     {
@@ -152,8 +165,8 @@ def create_city_building_parcels_table_sql() -> str:
           object_type TEXT NOT NULL DEFAULT '',
           street TEXT NOT NULL DEFAULT '',
           address TEXT NOT NULL DEFAULT '',
-          krovak_y REAL,
-          krovak_x REAL,
+          lat REAL,
+          lng REAL,
           has_building INTEGER NOT NULL DEFAULT 1,
           imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -283,10 +296,10 @@ def migrate_city_building_parcels_table(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE city_building_parcels ADD COLUMN address TEXT NOT NULL DEFAULT ''"
         )
-    if "krovak_y" not in columns:
-        conn.execute("ALTER TABLE city_building_parcels ADD COLUMN krovak_y REAL")
-    if "krovak_x" not in columns:
-        conn.execute("ALTER TABLE city_building_parcels ADD COLUMN krovak_x REAL")
+    if "lat" not in columns:
+        conn.execute("ALTER TABLE city_building_parcels ADD COLUMN lat REAL")
+    if "lng" not in columns:
+        conn.execute("ALTER TABLE city_building_parcels ADD COLUMN lng REAL")
     if "has_building" not in columns:
         conn.execute(
             "ALTER TABLE city_building_parcels ADD COLUMN has_building INTEGER NOT NULL DEFAULT 1"
@@ -299,6 +312,77 @@ def migrate_city_building_parcels_table(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE city_building_parcels ADD COLUMN updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"
         )
+
+    # Legacy migration from older builds that stored only EPSG:2065 coordinates.
+    has_legacy_krovak = "krovak_y" in columns and "krovak_x" in columns
+    if has_legacy_krovak:
+        rows = conn.execute(
+            """
+            SELECT id, krovak_y, krovak_x
+            FROM city_building_parcels
+            WHERE (lat IS NULL OR lng IS NULL)
+              AND krovak_y IS NOT NULL
+              AND krovak_x IS NOT NULL
+            """
+        ).fetchall()
+        for row in rows:
+            lat, lng = convert_epsg2065_to_wgs84(row["krovak_y"], row["krovak_x"])
+            if lat is None or lng is None:
+                continue
+            conn.execute(
+                """
+                UPDATE city_building_parcels
+                SET lat = ?, lng = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (lat, lng, row["id"]),
+            )
+
+        # Keep only GPS coordinates in legacy schemas too.
+        conn.execute(
+            """
+            UPDATE city_building_parcels
+            SET krovak_y = NULL, krovak_x = NULL
+            WHERE lat IS NOT NULL
+              AND lng IS NOT NULL
+              AND (krovak_y IS NOT NULL OR krovak_x IS NOT NULL)
+            """
+        )
+
+    rows_to_normalize = conn.execute(
+        """
+        SELECT id, object_type, street, address
+        FROM city_building_parcels
+        """
+    ).fetchall()
+    for row in rows_to_normalize:
+        object_type_norm, street_norm, address_norm = normalize_city_building_row(
+            str(row["object_type"] or ""),
+            str(row["street"] or ""),
+            str(row["address"] or ""),
+        )
+        if (
+            object_type_norm != str(row["object_type"] or "")
+            or street_norm != str(row["street"] or "")
+            or address_norm != str(row["address"] or "")
+        ):
+            conn.execute(
+                """
+                UPDATE city_building_parcels
+                SET object_type = ?, street = ?, address = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (object_type_norm, street_norm, address_norm, row["id"]),
+            )
+
+
+def city_building_table_has_legacy_krovak(conn: sqlite3.Connection) -> bool:
+    columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info('city_building_parcels')").fetchall()
+        if row["name"]
+    }
+    return "krovak_y" in columns and "krovak_x" in columns
 
 
 def ensure_default_layers(conn: sqlite3.Connection) -> None:
@@ -507,6 +591,83 @@ def clean_html_text(value: str) -> str:
     return " ".join(unescape(plain).split())
 
 
+def remove_cadastral_code(value: str) -> str:
+    text = " ".join(unescape(value or "").split())
+    text = re.sub(r"\s*\[\s*\d+\s*\]\s*", " ", text)
+    return " ".join(text.split()).strip(" ,;")
+
+
+def extract_building_number(value: str) -> str:
+    text = remove_cadastral_code(value)
+    cp_match = re.search(r"c\.\s*p\.\s*([0-9]+(?:/[0-9]+)?)", normalize_text(text))
+    if cp_match:
+        return cp_match.group(1)
+    number_match = re.search(r"\b([0-9]+(?:/[0-9]+)?)\b", text)
+    if number_match:
+        return number_match.group(1)
+    return ""
+
+
+def normalize_object_type(value: str) -> str:
+    text = remove_cadastral_code(value)
+    if ";" in text:
+        _, right = text.split(";", 1)
+        return right.strip()[:200]
+    return text.strip()[:200]
+
+
+def compose_building_address(street: str, building_number: str, city: str) -> str:
+    street_clean = remove_cadastral_code(street)
+    city_clean = remove_cadastral_code(city)
+    number_clean = extract_building_number(building_number)
+
+    first_part = street_clean
+    if number_clean and number_clean not in first_part:
+        first_part = f"{first_part} {number_clean}".strip()
+
+    if city_clean and city_clean.lower() not in first_part.lower():
+        return ", ".join(part for part in (first_part, city_clean) if part)[:260]
+    return first_part[:260]
+
+
+def normalize_city_building_row(
+    object_type: str, street: str, address: str
+) -> tuple[str, str, str]:
+    street_clean = remove_cadastral_code(street)
+    object_type_clean = normalize_object_type(object_type)
+
+    address_clean = remove_cadastral_code(address)
+    number_from_object = ""
+    if ";" in remove_cadastral_code(object_type):
+        left = remove_cadastral_code(object_type).split(";", 1)[0]
+        number_from_object = extract_building_number(left)
+    number_from_address = extract_building_number(address_clean)
+    building_number = number_from_address or number_from_object
+
+    city = ""
+    if "," in address_clean:
+        city = address_clean.split(",")[-1].strip()
+    elif street_clean:
+        rest = address_clean
+        if rest.lower().startswith(street_clean.lower()):
+            rest = rest[len(street_clean) :].strip(" ,")
+        if building_number:
+            rest = re.sub(
+                rf"\b{re.escape(building_number)}\b", "", rest, flags=re.IGNORECASE
+            ).strip(" ,")
+        city = rest
+
+    address_composed = compose_building_address(street_clean, building_number, city)
+    if not address_composed:
+        address_composed = address_clean[:260]
+
+    return (
+        object_type_clean[:200],
+        street_clean[:200],
+        address_composed[:260],
+    )
+
+
 def extract_parcel_number(value: str) -> str | None:
     patterns = (
         r"\bst\.\s*\d+(?:/\d+)?\b",
@@ -615,6 +776,7 @@ def parse_building_detail_from_parcel_html(html_text: str, parcel_url: str) -> d
     building_number = ""
     object_type = ""
     street = ""
+    city = ""
 
     for row_html in row_pattern.findall(html_text):
         cells = cell_pattern.findall(row_html)
@@ -627,16 +789,16 @@ def parse_building_detail_from_parcel_html(html_text: str, parcel_url: str) -> d
             detail_text = clean_html_text(detail_cell)
             if ";" in detail_text:
                 left, right = detail_text.split(";", 1)
-                building_number = left.strip()
-                object_type = right.strip()
+                building_number = extract_building_number(left)
+                object_type = normalize_object_type(right)
             else:
-                building_number = detail_text.strip()
+                building_number = extract_building_number(detail_text)
 
         if "budova bez cisla popisneho nebo evidencniho" in label:
             detail_cell = cells[-1]
             detail_text = clean_html_text(detail_cell)
             if detail_text:
-                object_type = detail_text.strip()
+                object_type = normalize_object_type(detail_text)
 
         if "stavebni objekt" in label:
             for cell in cells[1:]:
@@ -645,14 +807,16 @@ def parse_building_detail_from_parcel_html(html_text: str, parcel_url: str) -> d
                     continue
                 building_object_url = urljoin(parcel_url, unescape(anchor.group(1).strip()))
                 if not building_number:
-                    building_number = clean_html_text(anchor.group(2)).strip()
+                    building_number = extract_building_number(clean_html_text(anchor.group(2)))
                 break
 
         if label.startswith("ulice"):
-            street = clean_html_text(cells[1]).strip()
+            street = remove_cadastral_code(clean_html_text(cells[1]))
+        if label.startswith("obec"):
+            city = remove_cadastral_code(clean_html_text(cells[1]))
 
-    address_parts = [part for part in (street, building_number) if part]
-    address = " ".join(address_parts).strip()
+    address = compose_building_address(street, building_number, city)
+    object_type = normalize_object_type(object_type)
 
     return {
         "building_object_url": building_object_url[:800],
@@ -662,7 +826,9 @@ def parse_building_detail_from_parcel_html(html_text: str, parcel_url: str) -> d
     }
 
 
-def parse_krovak_coordinates_from_object_html(html_text: str) -> tuple[float | None, float | None]:
+def parse_epsg2065_coordinates_from_object_html(
+    html_text: str,
+) -> tuple[float | None, float | None]:
     normalized = html_text.replace("&nbsp;", " ").replace("\xa0", " ")
     match = re.search(
         r"Y:\s*([0-9\.\,\-\s]+)\s*X:\s*([0-9\.\,\-\s]+)",
@@ -686,6 +852,226 @@ def parse_krovak_coordinates_from_object_html(html_text: str) -> tuple[float | N
     y = parse_number(match.group(1))
     x = parse_number(match.group(2))
     return y, x
+
+
+KROVAK_A = 6377397.155
+KROVAK_ES = 0.006674372230614
+KROVAK_E = math.sqrt(KROVAK_ES)
+KROVAK_LAT0 = math.radians(49.5)
+KROVAK_LON0 = math.radians(24.8333333333333)
+KROVAK_K0 = 0.9999
+KROVAK_S45 = math.pi / 4
+KROVAK_S90 = math.pi / 2
+KROVAK_UQ = 1.04216856380474
+KROVAK_S0 = 1.37008346281555
+KROVAK_AD = KROVAK_S90 - KROVAK_UQ
+
+_krovak_sin_lat0 = math.sin(KROVAK_LAT0)
+_krovak_cos_lat0 = math.cos(KROVAK_LAT0)
+KROVAK_ALPHA = math.sqrt(
+    1 + (KROVAK_ES * (_krovak_cos_lat0**4)) / (1 - KROVAK_ES)
+)
+KROVAK_U0 = math.asin(_krovak_sin_lat0 / KROVAK_ALPHA)
+KROVAK_G = ((1 + KROVAK_E * _krovak_sin_lat0) / (1 - KROVAK_E * _krovak_sin_lat0)) ** (
+    (KROVAK_ALPHA * KROVAK_E) / 2
+)
+KROVAK_K = (
+    math.tan((KROVAK_U0 / 2) + KROVAK_S45)
+    / (math.tan((KROVAK_LAT0 / 2) + KROVAK_S45) ** KROVAK_ALPHA)
+) * KROVAK_G
+KROVAK_N0 = (
+    KROVAK_A * math.sqrt(1 - KROVAK_ES) / (1 - KROVAK_ES * (_krovak_sin_lat0**2))
+)
+KROVAK_N = math.sin(KROVAK_S0)
+KROVAK_RO0 = KROVAK_K0 * KROVAK_N0 / math.tan(KROVAK_S0)
+
+BESSEL_A = 6377397.155
+BESSEL_ES = 0.006674372230614
+WGS84_A = 6378137.0
+WGS84_ES = 0.0066943799901413165
+_SECONDS_TO_RADIANS = math.pi / (180 * 3600)
+TOWGS84 = (
+    570.8,
+    85.7,
+    462.8,
+    4.998 * _SECONDS_TO_RADIANS,
+    1.587 * _SECONDS_TO_RADIANS,
+    5.261 * _SECONDS_TO_RADIANS,
+    1 + 3.56e-6,
+)
+
+
+def is_inside_bounds(lat: float, lng: float, bounds: dict[str, float], padding: float) -> bool:
+    return (
+        lat >= bounds["south"] - padding
+        and lat <= bounds["north"] + padding
+        and lng >= bounds["west"] - padding
+        and lng <= bounds["east"] + padding
+    )
+
+
+def coordinate_score(lat: float, lng: float) -> int:
+    if is_inside_bounds(lat, lng, HUSTOPECE_BOUNDS, 0.2):
+        return 3
+    if is_inside_bounds(lat, lng, CZECH_BOUNDS, 0):
+        return 2
+    return 0
+
+
+def geodetic_to_geocentric(
+    lat: float, lon: float, a: float, es: float, height: float = 0.0
+) -> tuple[float, float, float]:
+    sin_lat = math.sin(lat)
+    cos_lat = math.cos(lat)
+    sin_lon = math.sin(lon)
+    cos_lon = math.cos(lon)
+    n = a / math.sqrt(1 - es * sin_lat * sin_lat)
+    x = (n + height) * cos_lat * cos_lon
+    y = (n + height) * cos_lat * sin_lon
+    z = (n * (1 - es) + height) * sin_lat
+    return x, y, z
+
+
+def geocentric_to_geodetic(
+    x: float, y: float, z: float, a: float, es: float
+) -> tuple[float, float]:
+    lon = math.atan2(y, x)
+    p = math.hypot(x, y)
+    if p <= 1e-12:
+        lat = math.copysign(math.pi / 2, z)
+        return lat, lon
+
+    lat = math.atan2(z, p * (1 - es))
+    for _ in range(15):
+        sin_lat = math.sin(lat)
+        n = a / math.sqrt(1 - es * sin_lat * sin_lat)
+        height = p / math.cos(lat) - n
+        next_lat = math.atan2(z, p * (1 - es * n / (n + height)))
+        if abs(next_lat - lat) < 1e-13:
+            lat = next_lat
+            break
+        lat = next_lat
+
+    return lat, lon
+
+
+def helmert_bessel_to_wgs84(x: float, y: float, z: float) -> tuple[float, float, float]:
+    dx, dy, dz, rx, ry, rz, scale = TOWGS84
+    x2 = dx + scale * (x - rz * y + ry * z)
+    y2 = dy + scale * (rz * x + y - rx * z)
+    z2 = dz + scale * (-ry * x + rx * y + z)
+    return x2, y2, z2
+
+
+def inverse_krovak_to_bessel(lat_x: float, lon_y: float, czech_variant: bool) -> tuple[float, float] | None:
+    x = float(lat_x)
+    y = float(lon_y)
+    if not czech_variant:
+        x = -x
+        y = -y
+
+    ro = math.hypot(x, y)
+    if ro <= 1e-9:
+        return None
+
+    eps = math.atan2(-x, -y)
+    d = eps / KROVAK_N
+    s = 2 * (
+        math.atan(((KROVAK_RO0 / ro) ** (1 / KROVAK_N)) * math.tan((KROVAK_S0 / 2) + KROVAK_S45))
+        - KROVAK_S45
+    )
+
+    u = math.asin(
+        math.cos(KROVAK_AD) * math.sin(s)
+        - math.sin(KROVAK_AD) * math.cos(s) * math.cos(d)
+    )
+    kau = math.tan((u / 2) + KROVAK_S45)
+
+    fi = u
+    for _ in range(15):
+        sin_fi = math.sin(fi)
+        ratio = (1 + KROVAK_E * sin_fi) / (1 - KROVAK_E * sin_fi)
+        fi_next = 2 * (
+            math.atan(
+                (KROVAK_K ** (-1 / KROVAK_ALPHA))
+                * (kau ** (1 / KROVAK_ALPHA))
+                * (ratio ** (KROVAK_E / 2))
+            )
+            - KROVAK_S45
+        )
+        if abs(fi_next - fi) < 1e-13:
+            fi = fi_next
+            break
+        fi = fi_next
+
+    denominator = (
+        math.sin(KROVAK_AD) * math.sin(s)
+        + math.cos(KROVAK_AD) * math.cos(s) * math.cos(d)
+    )
+    if abs(denominator) < 1e-14:
+        return None
+
+    lam = -math.atan((math.cos(s) * math.sin(d)) / denominator) / KROVAK_ALPHA
+    lon = KROVAK_LON0 + lam
+    lat = fi
+    return lat, lon
+
+
+def convert_epsg2065_variant_to_wgs84(
+    x: float, y: float, czech_variant: bool
+) -> tuple[float, float] | None:
+    bessel_lat_lon = inverse_krovak_to_bessel(x, y, czech_variant=czech_variant)
+    if not bessel_lat_lon:
+        return None
+    bessel_lat, bessel_lon = bessel_lat_lon
+
+    x_geo, y_geo, z_geo = geodetic_to_geocentric(
+        bessel_lat, bessel_lon, BESSEL_A, BESSEL_ES
+    )
+    x_wgs, y_wgs, z_wgs = helmert_bessel_to_wgs84(x_geo, y_geo, z_geo)
+    wgs_lat, wgs_lon = geocentric_to_geodetic(x_wgs, y_wgs, z_wgs, WGS84_A, WGS84_ES)
+    lat = math.degrees(wgs_lat)
+    lng = math.degrees(wgs_lon)
+    if not math.isfinite(lat) or not math.isfinite(lng):
+        return None
+    return lat, lng
+
+
+def convert_epsg2065_to_wgs84(
+    source_y: float | None, source_x: float | None
+) -> tuple[float | None, float | None]:
+    if source_y is None or source_x is None:
+        return None, None
+    if not math.isfinite(source_y) or not math.isfinite(source_x):
+        return None, None
+
+    variants = [
+        (source_x, source_y),
+        (source_y, source_x),
+        (-source_x, -source_y),
+        (-source_y, -source_x),
+        (source_x, -source_y),
+        (-source_x, source_y),
+        (source_y, -source_x),
+        (-source_y, source_x),
+    ]
+
+    best: tuple[float, float, int] | None = None
+    for x, y in variants:
+        for czech_variant in (False, True):
+            converted = convert_epsg2065_variant_to_wgs84(x, y, czech_variant)
+            if not converted:
+                continue
+            lat, lng = converted
+            score = coordinate_score(lat, lng)
+            if score <= 0:
+                continue
+            if not best or score > best[2]:
+                best = (lat, lng, score)
+
+    if not best:
+        return None, None
+    return best[0], best[1]
 
 
 def is_valid_seed_layer(layer: object) -> bool:
@@ -753,6 +1139,9 @@ class AppHandler(SimpleHTTPRequestHandler):
         if path == "/healthz":
             self.write_json(HTTPStatus.OK, {"status": "ok"})
             return
+        if path == "/api/admin/users":
+            self.handle_get_admin_users()
+            return
         if path == "/api/admin/buildings/parcels":
             self.handle_get_admin_building_parcels()
             return
@@ -803,6 +1192,13 @@ class AppHandler(SimpleHTTPRequestHandler):
 
     def do_PUT(self):
         path = urlparse(self.path).path
+        if path.startswith("/api/admin/users/"):
+            user_id = path.removeprefix("/api/admin/users/").strip()
+            if not user_id or "/" in user_id:
+                self.write_json(HTTPStatus.BAD_REQUEST, {"error": "Missing user id"})
+                return
+            self.handle_update_admin_user(user_id)
+            return
         if path.startswith("/api/pins/"):
             pin_id = path.removeprefix("/api/pins/").strip()
             if not pin_id:
@@ -1012,6 +1408,21 @@ class AppHandler(SimpleHTTPRequestHandler):
             "role": user_row["role"],
         }
 
+    def serialize_admin_user(self, user_row, current_user_id: str | None):
+        return {
+            "id": user_row["id"],
+            "email": user_row["email"],
+            "name": user_row["name"],
+            "role": user_row["role"],
+            "last_login_at": user_row["last_login_at"],
+            "created_at": user_row["created_at"],
+            "updated_at": user_row["updated_at"],
+            "has_active_session": bool(user_row["auth_token"]),
+            "is_current_user": bool(
+                current_user_id and current_user_id == user_row["id"]
+            ),
+        }
+
     def serialize_admin_building_parcel(self, row):
         return {
             "id": row["id"],
@@ -1022,8 +1433,8 @@ class AppHandler(SimpleHTTPRequestHandler):
             "object_type": row["object_type"],
             "street": row["street"],
             "address": row["address"],
-            "krovak_y": row["krovak_y"],
-            "krovak_x": row["krovak_x"],
+            "lat": row["lat"],
+            "lng": row["lng"],
             "has_building": bool(row["has_building"]),
             "imported_at": row["imported_at"],
             "updated_at": row["updated_at"],
@@ -1036,14 +1447,14 @@ class AppHandler(SimpleHTTPRequestHandler):
             "object_type": row["object_type"],
             "street": row["street"],
             "address": row["address"],
-            "krovak_y": row["krovak_y"],
-            "krovak_x": row["krovak_x"],
+            "lat": row["lat"],
+            "lng": row["lng"],
         }
         return {
             "id": row["id"],
             "layer_key": CITY_BUILDINGS_LAYER_KEY,
-            "lat": None,
-            "lng": None,
+            "lat": row["lat"],
+            "lng": row["lng"],
             "title": row["parcel_label"],
             "description": row["object_type"] or row["address"] or "",
             "data": data,
@@ -1208,6 +1619,146 @@ class AppHandler(SimpleHTTPRequestHandler):
         finally:
             conn.close()
 
+    def handle_get_admin_users(self):
+        conn = get_conn()
+        try:
+            auth_user = self.get_auth_user(conn)
+            if not auth_user:
+                self.write_json(HTTPStatus.UNAUTHORIZED, {"error": "Login required"})
+                return
+            if not self.is_admin(auth_user):
+                self.write_json(HTTPStatus.FORBIDDEN, {"error": "Admin only"})
+                return
+
+            rows = conn.execute(
+                """
+                SELECT id, email, name, role, auth_token, last_login_at, created_at, updated_at
+                FROM users
+                ORDER BY
+                  CASE role
+                    WHEN 'admin' THEN 0
+                    WHEN 'moderator' THEN 1
+                    ELSE 2
+                  END ASC,
+                  email COLLATE NOCASE ASC
+                """
+            ).fetchall()
+            users = [
+                self.serialize_admin_user(row, current_user_id=auth_user["id"])
+                for row in rows
+            ]
+            self.write_json(HTTPStatus.OK, {"users": users})
+        finally:
+            conn.close()
+
+    def handle_update_admin_user(self, user_id: str):
+        payload = self.read_json()
+        if payload is None:
+            return
+        if not isinstance(payload, dict):
+            self.write_json(HTTPStatus.BAD_REQUEST, {"error": "Invalid user payload"})
+            return
+
+        requested_role = payload.get("role")
+        requested_name = payload.get("name")
+        revoke_token = payload.get("revoke_token", False)
+
+        role_value = None
+        if requested_role is not None:
+            if not isinstance(requested_role, str):
+                self.write_json(HTTPStatus.BAD_REQUEST, {"error": "Invalid user role"})
+                return
+            role_value = requested_role.strip().lower()
+            if role_value not in ("admin", "moderator", "user"):
+                self.write_json(HTTPStatus.BAD_REQUEST, {"error": "Invalid user role"})
+                return
+
+        name_value = None
+        if requested_name is not None:
+            if not isinstance(requested_name, str):
+                self.write_json(HTTPStatus.BAD_REQUEST, {"error": "Invalid user name"})
+                return
+            name_value = normalize_name(requested_name)
+            if not name_value:
+                self.write_json(HTTPStatus.BAD_REQUEST, {"error": "Invalid user name"})
+                return
+
+        if not isinstance(revoke_token, bool):
+            self.write_json(HTTPStatus.BAD_REQUEST, {"error": "Invalid revoke_token value"})
+            return
+
+        if role_value is None and name_value is None and not revoke_token:
+            self.write_json(HTTPStatus.BAD_REQUEST, {"error": "No changes requested"})
+            return
+
+        conn = get_conn()
+        try:
+            auth_user = self.get_auth_user(conn)
+            if not auth_user:
+                self.write_json(HTTPStatus.UNAUTHORIZED, {"error": "Login required"})
+                return
+            if not self.is_admin(auth_user):
+                self.write_json(HTTPStatus.FORBIDDEN, {"error": "Admin only"})
+                return
+
+            row = conn.execute(
+                """
+                SELECT id, email, name, role, auth_token, last_login_at, created_at, updated_at
+                FROM users
+                WHERE id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+            if not row:
+                self.write_json(HTTPStatus.NOT_FOUND, {"error": "User not found"})
+                return
+
+            updates = []
+            params = []
+
+            if role_value is not None and role_value != row["role"]:
+                if row["role"] == "admin" and role_value != "admin":
+                    admins_left = conn.execute(
+                        "SELECT COUNT(*) AS c FROM users WHERE role = 'admin' AND id <> ?",
+                        (row["id"],),
+                    ).fetchone()["c"]
+                    if admins_left == 0:
+                        self.write_json(
+                            HTTPStatus.CONFLICT,
+                            {"error": "Neni mozne odebrat roli poslednimu adminovi"},
+                        )
+                        return
+                updates.append("role = ?")
+                params.append(role_value)
+
+            if name_value is not None and name_value != row["name"]:
+                updates.append("name = ?")
+                params.append(name_value[:80])
+
+            if revoke_token:
+                updates.append("auth_token = NULL")
+
+            if updates:
+                sql = f"UPDATE users SET {', '.join(updates)}, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+                params.append(row["id"])
+                conn.execute(sql, tuple(params))
+                conn.commit()
+
+            refreshed = conn.execute(
+                """
+                SELECT id, email, name, role, auth_token, last_login_at, created_at, updated_at
+                FROM users
+                WHERE id = ?
+                """,
+                (row["id"],),
+            ).fetchone()
+            self.write_json(
+                HTTPStatus.OK,
+                {"user": self.serialize_admin_user(refreshed, current_user_id=auth_user["id"])},
+            )
+        finally:
+            conn.close()
+
     def handle_get_admin_building_parcels(self):
         conn = get_conn()
         try:
@@ -1224,7 +1775,7 @@ class AppHandler(SimpleHTTPRequestHandler):
             rows = conn.execute(
                 """
                 SELECT id, source_url, parcel_label, parcel_url, building_object_url,
-                       object_type, street, address, krovak_y, krovak_x,
+                       object_type, street, address, lat, lng,
                        has_building, imported_at, updated_at
                 FROM city_building_parcels
                 ORDER BY updated_at DESC, parcel_label COLLATE NOCASE ASC
@@ -1250,7 +1801,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                 rows = conn.execute(
                     """
                     SELECT id, parcel_label, parcel_url, building_object_url,
-                           object_type, street, address, krovak_y, krovak_x,
+                           object_type, street, address, lat, lng,
                            imported_at, updated_at
                     FROM city_building_parcels
                     WHERE has_building = 1
@@ -1519,23 +2070,24 @@ class AppHandler(SimpleHTTPRequestHandler):
                     "object_type": "",
                     "street": "",
                     "address": "",
-                    "krovak_y": None,
-                    "krovak_x": None,
+                    "lat": None,
+                    "lng": None,
                 }
                 try:
                     detail_html = fetch_remote_html(parcel["parcel_url"])
                     details = parse_building_detail_from_parcel_html(
                         detail_html, parcel["parcel_url"]
                     )
-                    details["krovak_y"] = None
-                    details["krovak_x"] = None
+                    details["lat"] = None
+                    details["lng"] = None
                     if details.get("building_object_url"):
                         try:
                             object_html = fetch_remote_html(details["building_object_url"])
-                            y, x = parse_krovak_coordinates_from_object_html(object_html)
-                            details["krovak_y"] = y
-                            details["krovak_x"] = x
-                            if y is None or x is None:
+                            y, x = parse_epsg2065_coordinates_from_object_html(object_html)
+                            lat, lng = convert_epsg2065_to_wgs84(y, x)
+                            details["lat"] = lat
+                            details["lng"] = lng
+                            if lat is None or lng is None:
                                 coordinate_failures += 1
                         except URLError:
                             coordinate_failures += 1
@@ -1575,11 +2127,18 @@ class AppHandler(SimpleHTTPRequestHandler):
     ) -> tuple[int, int]:
         inserted_count = 0
         updated_count = 0
+        has_legacy_krovak = city_building_table_has_legacy_krovak(conn)
         for parcel in parsed_parcels:
             existing = conn.execute(
                 "SELECT id FROM city_building_parcels WHERE parcel_url = ?",
                 (parcel["parcel_url"],),
             ).fetchone()
+            object_type_norm, street_norm, address_norm = normalize_city_building_row(
+                str(parcel.get("object_type", "")),
+                str(parcel.get("street", "")),
+                str(parcel.get("address", "")),
+            )
+            parcel_id = existing["id"] if existing else generate_id("parcel")
             if existing:
                 updated_count += 1
             else:
@@ -1590,7 +2149,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                 INSERT INTO city_building_parcels (
                     id, source_url, parcel_label, parcel_url,
                     building_object_url, object_type, street, address,
-                    krovak_y, krovak_x, has_building
+                    lat, lng, has_building
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
                 ON CONFLICT(parcel_url) DO UPDATE SET
@@ -1600,24 +2159,33 @@ class AppHandler(SimpleHTTPRequestHandler):
                     object_type = excluded.object_type,
                     street = excluded.street,
                     address = excluded.address,
-                    krovak_y = excluded.krovak_y,
-                    krovak_x = excluded.krovak_x,
+                    lat = excluded.lat,
+                    lng = excluded.lng,
                     has_building = 1,
                     updated_at = CURRENT_TIMESTAMP
                 """,
                 (
-                    existing["id"] if existing else generate_id("parcel"),
+                    parcel_id,
                     source_url[:800],
                     parcel["parcel_label"][:200],
                     parcel["parcel_url"][:800],
                     str(parcel.get("building_object_url", ""))[:800],
-                    str(parcel.get("object_type", ""))[:200],
-                    str(parcel.get("street", ""))[:200],
-                    str(parcel.get("address", ""))[:260],
-                    parcel.get("krovak_y"),
-                    parcel.get("krovak_x"),
+                    object_type_norm[:200],
+                    street_norm[:200],
+                    address_norm[:260],
+                    parcel.get("lat"),
+                    parcel.get("lng"),
                 ),
             )
+            if has_legacy_krovak:
+                conn.execute(
+                    """
+                    UPDATE city_building_parcels
+                    SET krovak_y = NULL, krovak_x = NULL
+                    WHERE id = ?
+                    """,
+                    (parcel_id,),
+                )
         return inserted_count, updated_count
 
     def handle_refresh_admin_building_coordinates(self):
@@ -1641,6 +2209,7 @@ class AppHandler(SimpleHTTPRequestHandler):
             updated = 0
             failed = 0
             skipped = 0
+            has_legacy_krovak = city_building_table_has_legacy_krovak(conn)
             for row in rows:
                 object_url = row["building_object_url"]
                 if not isinstance(object_url, str) or not object_url.strip():
@@ -1648,18 +2217,29 @@ class AppHandler(SimpleHTTPRequestHandler):
                     continue
                 try:
                     object_html = fetch_remote_html(object_url)
-                    y, x = parse_krovak_coordinates_from_object_html(object_html)
-                    if y is None or x is None:
+                    y, x = parse_epsg2065_coordinates_from_object_html(object_html)
+                    lat, lng = convert_epsg2065_to_wgs84(y, x)
+                    if lat is None or lng is None:
                         failed += 1
                         continue
-                    conn.execute(
-                        """
-                        UPDATE city_building_parcels
-                        SET krovak_y = ?, krovak_x = ?, updated_at = CURRENT_TIMESTAMP
-                        WHERE id = ?
-                        """,
-                        (y, x, row["id"]),
-                    )
+                    if has_legacy_krovak:
+                        conn.execute(
+                            """
+                            UPDATE city_building_parcels
+                            SET lat = ?, lng = ?, krovak_y = NULL, krovak_x = NULL, updated_at = CURRENT_TIMESTAMP
+                            WHERE id = ?
+                            """,
+                            (lat, lng, row["id"]),
+                        )
+                    else:
+                        conn.execute(
+                            """
+                            UPDATE city_building_parcels
+                            SET lat = ?, lng = ?, updated_at = CURRENT_TIMESTAMP
+                            WHERE id = ?
+                            """,
+                            (lat, lng, row["id"]),
+                        )
                     updated += 1
                 except URLError:
                     failed += 1

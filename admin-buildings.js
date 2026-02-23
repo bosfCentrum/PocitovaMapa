@@ -114,13 +114,13 @@ async function loadParcels() {
     renderParcelsTable();
   } catch (error) {
     authInfo.textContent = error?.message || "Nepodarilo se nacist pozemky.";
-    parcelsTableBody.innerHTML = '<tr><td colspan="6">Nacitani selhalo.</td></tr>';
+    parcelsTableBody.innerHTML = '<tr><td colspan="5">Nacitani selhalo.</td></tr>';
   }
 }
 
 function renderParcelsTable() {
   if (!state.parcels.length) {
-    parcelsTableBody.innerHTML = '<tr><td colspan="6">Zatim nejsou ulozene zadne pozemky.</td></tr>';
+    parcelsTableBody.innerHTML = '<tr><td colspan="5">Zatim nejsou ulozene zadne pozemky.</td></tr>';
     return;
   }
 
@@ -133,15 +133,6 @@ function renderParcelsTable() {
     label.className = "building-title";
     label.textContent = parcel.parcel_label || "Pozemek";
     labelCell.appendChild(label);
-
-    const linkCell = document.createElement("td");
-    const link = document.createElement("a");
-    link.href = parcel.parcel_url;
-    link.target = "_blank";
-    link.rel = "noopener noreferrer";
-    link.textContent = "Otevrit detail";
-    link.title = parcel.parcel_url;
-    linkCell.appendChild(link);
 
     const objectCell = document.createElement("td");
     if (parcel.building_object_url) {
@@ -163,16 +154,21 @@ function renderParcelsTable() {
     addressCell.textContent = parcel.address || "-";
 
     const coordsCell = document.createElement("td");
-    if (typeof parcel.krovak_y === "number" && typeof parcel.krovak_x === "number") {
-      const yText = parcel.krovak_y.toLocaleString("cs-CZ", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-      const xText = parcel.krovak_x.toLocaleString("cs-CZ", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-      coordsCell.textContent = `Y: ${yText} X: ${xText}`;
+    if (typeof parcel.lat === "number" && typeof parcel.lng === "number") {
+      const latText = parcel.lat.toLocaleString("cs-CZ", {
+        minimumFractionDigits: 6,
+        maximumFractionDigits: 6,
+      });
+      const lngText = parcel.lng.toLocaleString("cs-CZ", {
+        minimumFractionDigits: 6,
+        maximumFractionDigits: 6,
+      });
+      coordsCell.textContent = `Lat: ${latText} Lng: ${lngText}`;
     } else {
       coordsCell.textContent = "-";
     }
 
     row.appendChild(labelCell);
-    row.appendChild(linkCell);
     row.appendChild(objectCell);
     row.appendChild(typeCell);
     row.appendChild(addressCell);

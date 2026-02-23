@@ -12,7 +12,7 @@
       <header class="admin-header">
         <div>
           <h1>Sprava uzivatelu</h1>
-          <p class="admin-subtitle">Pripraveno pro dalsi rozsireni.</p>
+          <p class="admin-subtitle">Prehled uzivatelu, zmena role a odhlaseni aktivni relace.</p>
         </div>
         <div class="admin-header-actions">
           <a class="auth-btn" href="/admin.html">Menu administrace</a>
@@ -24,7 +24,30 @@
 
       <main id="admin-content" class="admin-content hidden">
         <section class="admin-section">
-          <div class="admin-placeholder">Tato stranka zatim neobsahuje zadne nastaveni.</div>
+          <div class="admin-section-head">
+            <h2>Uzivatele</h2>
+            <p>Zmeny role se projevi hned po ulozeni. Aktivni relaci lze ukoncit tlacitkem Odhlasit.</p>
+          </div>
+          <p id="users-note" class="admin-import-note"></p>
+          <div class="admin-table-wrap">
+            <table class="admin-table">
+              <thead>
+                <tr>
+                  <th>Jmeno</th>
+                  <th>Email</th>
+                  <th>Role</th>
+                  <th>Posledni prihlaseni</th>
+                  <th>Relace</th>
+                  <th>Akce</th>
+                </tr>
+              </thead>
+              <tbody id="users-table-body">
+                <tr>
+                  <td colspan="6">Nacitam uzivatele...</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </section>
       </main>
     </div>
